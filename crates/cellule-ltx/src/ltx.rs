@@ -276,6 +276,39 @@ pub fn is_valid_page_size(sz: u32) -> bool {
     false
 }
 
+/// Worst-case file-index bytes one page adds: three uvarints.
+///
+/// A page number stays below five bytes and both `u64` offsets below ten, so
+/// thirty bytes cover one entry and the trailing zero marker.
+const INDEX_ENTRY_UPPER_BOUND: u64 = 40;
+
+/// Worst-case encoded bytes of one page frame.
+///
+/// Covers the fixed page header, the compressed-length field, and the
+/// compressor's worst-case output. An actual encoder never exceeds it because
+/// it compresses every page with the same bound the codec reports.
+pub(crate) fn frame_payload_upper_bound(page_size: u32) -> Result<u64> {
+    let compressed = crate::lz4_block::compress_bound(page_size as usize) as u64;
+    compressed
+        .checked_add((PAGE_HEADER_SIZE + 4) as u64)
+        .ok_or(LtxError::Limit(crate::LimitKind::LtxFileBytes))
+}
+
+/// Upper bound of the LTX file size that encodes `pages` pages.
+///
+/// Callers use it to admit a cut before writing: a commit whose bound exceeds
+/// the configured limit is refused instead of being captured and then failing.
+pub(crate) fn cut_upper_bound(page_size: u32, pages: u64) -> Result<u64> {
+    pages
+        .checked_mul(
+            frame_payload_upper_bound(page_size)?
+                .checked_add(INDEX_ENTRY_UPPER_BOUND)
+                .ok_or(LtxError::Limit(crate::LimitKind::LtxFileBytes))?,
+        )
+        .and_then(|bytes| bytes.checked_add((HEADER_SIZE + TRAILER_SIZE) as u64))
+        .ok_or(LtxError::Limit(crate::LimitKind::LtxFileBytes))
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedFile {
     pub header: Header,
@@ -284,13 +317,39 @@ pub struct DecodedFile {
 
 type DecodedPages = Vec<(u32, Vec<u8>)>;
 
-pub fn decode_file(bytes: &[u8]) -> Result<DecodedFile> {
-    decode_file_inner(bytes, false).map(|(file, _)| file)
-}
-
 pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile, u64, [u8; 32])> {
     let (file, _, size, digest) = decode_reader_inner(reader, false)?;
     Ok((file, size, digest))
+}
+
+/// Decodes one complete LTX stream and summarizes what it carries.
+///
+/// Page bodies are never retained. Scratch includes one page, its compressed
+/// bytes, a bounded footer buffer, and an observed entry per page.
+pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<crate::internal::InspectedLtx> {
+    let mut decoder = crate::codec::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.decode_header()?;
+    let page_size = decoder.header.page_size;
+    let mut data = vec![0; page_size as usize];
+    let mut pages = 0_u32;
+    while decoder.decode_page(&mut data)?.is_some() {
+        pages = pages
+            .checked_add(1)
+            .ok_or(LtxError::Limit(crate::LimitKind::LtxPageIndexBytes))?;
+    }
+    decoder.close()?;
+    let (size_bytes, blake3) = decoder.artifact()?;
+    Ok(crate::internal::InspectedLtx {
+        page_size,
+        commit: decoder.header.commit,
+        min_txid: decoder.header.min_txid.0,
+        max_txid: decoder.header.max_txid.0,
+        pre_apply_checksum: decoder.header.pre_apply_checksum,
+        post_apply_checksum: decoder.trailer.post_apply_checksum,
+        pages,
+        size_bytes,
+        blake3,
+    })
 }
 
 /// Inspects a replica-sized LTX stream without retaining its body.
@@ -301,7 +360,7 @@ pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile,
 pub(crate) fn inspect_reader_with_index(
     reader: impl std::io::Read,
 ) -> Result<(DecodedFile, u64, [u8; 32], Vec<crate::codec::EncodedPage>)> {
-    let mut decoder = crate::codec::Decoder::new(reader);
+    let mut decoder = crate::codec::Decoder::new_with_index(reader);
     decoder.decode_header()?;
     let mut data = vec![0; decoder.header.page_size as usize];
     while decoder.decode_page(&mut data)?.is_some() {}
@@ -314,7 +373,7 @@ pub(crate) fn inspect_reader_with_index(
         },
         size,
         digest,
-        decoder.replica_index().to_vec(),
+        decoder.into_replica_index()?,
     ))
 }
 

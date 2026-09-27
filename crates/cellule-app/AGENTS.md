@@ -1,5 +1,15 @@
-# cellule-app
+# AGENTS.md
 
-Owns statically linked module registration, stable application descriptors, topology declarations, and typed author handles. Keep provider construction, network ingress, and node ownership in the embedding service or `cellule-host`. A descriptor digest is a persisted contract: changes need a migration or explicit compatibility proof.
+Scoped rules for `crates/cellule-app/`. Root guidance applies.
 
-The standalone SQL, KV, Queue, Workflow/Activity, and Cron/Effect examples and the seven-Cell reference application exercise SQL, KV, Blob, Queue, Workflow, Activity, Cron, and Effect primitives. Keep examples compiled and verify their visible outcomes. Read `PERFORMANCE.md` before changing ignored benchmarks; preserve measured-run provenance. Run `cargo test -p cellule-app --locked` after changes.
+- Keep this crate dependency-light: runtime contracts only; no HTTP, provider,
+  storage construction, credentials, or node lifecycle policy.
+- Stable IDs, role, shard count, and descriptor bytes are application contracts.
+- Do not expose raw SQLite, authority, replica, local paths, or arbitrary
+  operation IDs through the author handle.
+- Layout: the integration suites are `tests/reference_application.rs` (with
+  `tests/reference_application/`) and `tests/contracts.rs`; `src/tests.rs` is the
+  only in-src test location and is listed in `tests-allow-list.txt`.
+- Run `python3 scripts/check-cell-ltx-layout.py` after layout changes.
+- Run the crate tests, format, Clippy, and dependency-tree checks after API
+  changes.

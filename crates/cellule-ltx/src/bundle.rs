@@ -17,13 +17,15 @@ use tempfile::TempPath;
 /// Keeps a server-owned verified bundle artifact alive while an overlay uses it.
 pub trait BundleLease: Send + Sync {}
 
-/// One immutable segment and its Cell/incarnation identity, before bundling.
-///
-/// `repository` is the retained CRB1 row name; its value encodes a Cell ID.
+/// One immutable segment and its repository/epoch identity, before bundling.
 pub struct BundleEntry {
+    /// Canonical repository identity the segment belongs to.
     pub repository: String,
+    /// Canonical epoch identity the segment was captured under.
     pub epoch: String,
+    /// Manifest expectations the segment must satisfy.
     pub info: SegmentInfo,
+    /// Complete immutable segment bytes.
     pub bytes: Vec<u8>,
 }
 
@@ -37,8 +39,8 @@ impl BundleEntry {
         bytes: Vec<u8>,
     ) -> Self {
         Self {
-            repository: encode_identity(&cell),
-            epoch: encode_identity(&incarnation),
+            repository: crate::hex::encode_hex(&cell),
+            epoch: crate::hex::encode_hex(&incarnation),
             info,
             bytes,
         }
@@ -46,14 +48,16 @@ impl BundleEntry {
 }
 
 /// A verified segment's byte extent in a bundle; identity is not authorization.
-///
-/// `repository` is the retained CRB1 row name; its value encodes a Cell ID.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleRow {
+    /// Canonical repository identity the row was verified against.
     pub repository: String,
+    /// Canonical epoch identity the row was verified against.
     pub epoch: String,
+    /// Manifest expectations the row's segment satisfied.
     pub info: SegmentInfo,
+    /// Byte offset of the segment inside the bundle.
     pub offset: u64,
 }
 
@@ -114,7 +118,7 @@ impl BundleBuilder {
     pub fn new_temp(directory: &Path, limits: Limits) -> Result<Self> {
         let limits = limits.validate()?;
         let file = tempfile::Builder::new()
-            .prefix(".cellule-bundle-")
+            .prefix(".crab-bundle-")
             .tempfile_in(directory)?;
         Ok(Self {
             path: file.into_temp_path(),
@@ -136,7 +140,7 @@ impl BundleBuilder {
             || entry.repository.len() > 4096
             || !valid_epoch(&entry.epoch)
         {
-            return Err(LtxError::Limit("bundle entries"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleEntries));
         }
         crate::recovery::verify_segment(&entry.bytes, &entry.info, self.limits)?;
         let identity = (
@@ -151,9 +155,9 @@ impl BundleBuilder {
         let next_len = self
             .payload_len
             .checked_add(entry.info.size_bytes)
-            .ok_or(LtxError::Limit("bundle bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::BundleBytes))?;
         if next_len > self.limits.max_plan_bytes {
-            return Err(LtxError::Limit("bundle bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
         }
         let write_result = OpenOptions::new()
             .append(true)
@@ -179,15 +183,15 @@ impl BundleBuilder {
             return Err(LtxError::InvalidState("bundle builder has no valid rows"));
         }
         let footer = serde_json::to_vec(&self.rows)?;
-        let footer_len =
-            u32::try_from(footer.len()).map_err(|_| LtxError::Limit("bundle footer"))?;
+        let footer_len = u32::try_from(footer.len())
+            .map_err(|_| LtxError::Limit(crate::LimitKind::BundleFooter))?;
         let total = self
             .payload_len
             .checked_add(footer.len() as u64)
             .and_then(|length| length.checked_add(8))
-            .ok_or(LtxError::Limit("bundle bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::BundleBytes))?;
         if total > self.limits.max_plan_bytes {
-            return Err(LtxError::Limit("bundle bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
         }
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&footer)?;
@@ -203,7 +207,7 @@ impl Bundle {
     pub fn encode(entries: Vec<BundleEntry>, limits: Limits) -> Result<Self> {
         let limits = limits.validate()?;
         if entries.is_empty() || entries.len() > limits.max_segments {
-            return Err(LtxError::Limit("bundle entries"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleEntries));
         }
         let mut bytes = Vec::new();
         let mut rows = Vec::new();
@@ -216,7 +220,7 @@ impl Bundle {
             }
             crate::recovery::verify_segment(&entry.bytes, &entry.info, limits)?;
             if (bytes.len() as u64).saturating_add(entry.info.size_bytes) > limits.max_plan_bytes {
-                return Err(LtxError::Limit("bundle bytes"));
+                return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
             }
             rows.push(BundleRow {
                 repository: entry.repository,
@@ -227,7 +231,8 @@ impl Bundle {
             bytes.extend(entry.bytes);
         }
         let footer = serde_json::to_vec(&rows)?;
-        let len = u32::try_from(footer.len()).map_err(|_| LtxError::Limit("bundle footer"))?;
+        let len = u32::try_from(footer.len())
+            .map_err(|_| LtxError::Limit(crate::LimitKind::BundleFooter))?;
         bytes.extend(footer);
         bytes.extend(len.to_le_bytes());
         bytes.extend(b"CRB1");
@@ -243,7 +248,7 @@ impl Bundle {
     pub fn decode_bytes(bytes: Bytes, limits: Limits) -> Result<Self> {
         let limits = limits.validate()?;
         if bytes.len() as u64 > limits.max_plan_bytes {
-            return Err(LtxError::Limit("bundle bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
         }
         let (rows, payload_end) = decode_footer(&bytes, limits)?;
         validate_row_layout(&rows, payload_end, limits)?;
@@ -306,7 +311,7 @@ impl Bundle {
         let length = std::fs::metadata(&source)?.len();
         let limits = limits.validate()?;
         if length > limits.max_plan_bytes {
-            return Err(LtxError::Limit("bundle bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
         }
         let digest = hash_file(&source)?;
         if digest != expected {
@@ -347,21 +352,25 @@ impl Bundle {
         Ok(std::mem::take(&mut file.path))
     }
 
+    /// Returns the verified segment rows in bundle order.
     #[must_use]
     pub fn rows(&self) -> &[BundleRow] {
         &self.rows
     }
 
+    /// Returns the total verified bundle length in bytes.
     #[must_use]
     pub const fn len(&self) -> u64 {
         self.length
     }
 
+    /// Reports whether the verified bundle holds no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
 
+    /// Returns the BLAKE3 digest of the verified envelope.
     #[must_use]
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
@@ -383,6 +392,7 @@ impl Bundle {
         }
     }
 
+    /// Returns the verified bundle body, re-checking a file-backed digest.
     #[must_use = "use or handle the verified bundle bytes"]
     pub fn bytes(&self) -> Result<Bytes> {
         self.read_all()
@@ -485,7 +495,7 @@ fn decode_footer(bytes: &[u8], limits: Limits) -> Result<(Vec<BundleRow>, u64)> 
     let start = trailer.checked_sub(length).ok_or(LtxError::LTXCorrupted)?;
     let rows: Vec<BundleRow> = serde_json::from_slice(&bytes[start..trailer])?;
     if rows.is_empty() || rows.len() > limits.max_segments {
-        return Err(LtxError::Limit("bundle entries"));
+        return Err(LtxError::Limit(crate::LimitKind::BundleEntries));
     }
     Ok((rows, start as u64))
 }
@@ -501,7 +511,7 @@ fn decode_file_rows(path: &Path, limits: Limits) -> Result<(Vec<BundleRow>, u64)
     let mut source = File::open(path)?;
     let length = source.metadata()?.len();
     if length > limits.max_plan_bytes {
-        return Err(LtxError::Limit("bundle bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::BundleBytes));
     }
     let trailer_offset = length.checked_sub(8).ok_or(LtxError::LTXCorrupted)?;
     let mut trailer = [0; 8];
@@ -517,8 +527,8 @@ fn decode_file_rows(path: &Path, limits: Limits) -> Result<(Vec<BundleRow>, u64)
     let footer_start = trailer_offset
         .checked_sub(footer_length)
         .ok_or(LtxError::LTXCorrupted)?;
-    let footer_size =
-        usize::try_from(footer_length).map_err(|_| LtxError::Limit("bundle footer"))?;
+    let footer_size = usize::try_from(footer_length)
+        .map_err(|_| LtxError::Limit(crate::LimitKind::BundleFooter))?;
     let mut footer = vec![0; footer_size];
     read_exact_at(&mut source, footer_start, &mut footer)?;
     let rows: Vec<BundleRow> = serde_json::from_slice(&footer)?;
@@ -548,7 +558,7 @@ fn hash_file(path: &Path) -> Result<[u8; 32]> {
 
 fn validate_row_layout(rows: &[BundleRow], payload_end: u64, limits: Limits) -> Result<()> {
     if rows.is_empty() || rows.len() > limits.max_segments {
-        return Err(LtxError::Limit("bundle entries"));
+        return Err(LtxError::Limit(crate::LimitKind::BundleEntries));
     }
     let mut end = 0u64;
     let mut identities = BTreeSet::new();
@@ -585,17 +595,10 @@ fn read_exact_at(file: &mut File, offset: u64, bytes: &mut [u8]) -> std::io::Res
 }
 
 pub(crate) fn cell_identity(cell: &[u8; 32], incarnation: &[u8; 16]) -> (String, String) {
-    (encode_identity(cell), encode_identity(incarnation))
-}
-
-fn encode_identity(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
+    (
+        crate::hex::encode_hex(cell),
+        crate::hex::encode_hex(incarnation),
+    )
 }
 
 fn valid_epoch(epoch: &str) -> bool {

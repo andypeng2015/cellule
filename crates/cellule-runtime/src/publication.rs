@@ -1,9 +1,15 @@
-use crate::{
-    ApplicationId, CellAuthority, CellExecutor, CommitTicket, Error, NodeDurability,
-    NodeLogSubmission, Result, StoredOutcome, Transition, VersionedControl,
-};
+//! Immutable root preparation, authority CAS, and result release.
+use crate::cell::executor::{CellExecutor, StoredOutcome};
+use crate::control::Transition;
+use crate::control::authority::{CellAuthority, VersionedControl};
+use crate::fleet::telemetry::DurabilitySubmissionOutcome;
+use crate::identity::{ApplicationId, encode_hex};
+use crate::node::durability::NodeDurability;
+use crate::node::log::CommitTicket;
+use crate::node::log_shipper::NodeLogSubmission;
+use crate::retry::{Backoff, retry_hint, retryable_storage_error};
+use crate::{Error, Result};
 
-const MAX_RETRY_DELAY_MS: u64 = 1_000;
 const COMPACTION_CHECK_INTERVAL: u8 = 8;
 const COMPACTION_DEBT_SEGMENTS: usize = 32;
 const MAX_COMPACTION_CASCADE: usize = 9;
@@ -17,11 +23,11 @@ pub(crate) type NodeDurabilitySlot =
 #[derive(Clone)]
 pub(crate) struct CellDurabilitySubmitter {
     cell: crate::CellId,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     epoch: u64,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<NodeDurabilitySlot>,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 /// Coordinates immutable preparation, authority CAS and result release.
@@ -39,7 +45,7 @@ pub struct CellPublisher {
     renew_at: std::time::Instant,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<NodeDurabilitySlot>,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl CellPublisher {
@@ -63,7 +69,7 @@ impl CellPublisher {
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
             node_lease: None,
             node_durability: None,
-            telemetry: crate::CellTelemetryHandle::default(),
+            telemetry: crate::fleet::telemetry::CellTelemetryHandle::default(),
         }
     }
 
@@ -77,14 +83,17 @@ impl CellPublisher {
         self
     }
 
-    pub(crate) fn with_telemetry(mut self, telemetry: crate::CellTelemetryHandle) -> Self {
+    pub(crate) fn with_telemetry(
+        mut self,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
+    ) -> Self {
         self.telemetry = telemetry;
         self
     }
 
     pub(crate) async fn submit_migration_durability(
         &self,
-        pending: &crate::PendingMigration,
+        pending: &crate::cell::executor::PendingMigration,
     ) -> Result<Option<PendingDurability>> {
         self.durability_submitter()
             .submit(pending.commit_sequence(), pending.cuts())
@@ -105,12 +114,19 @@ impl CellPublisher {
 
     pub(crate) fn record_object_proof(&self, waited: std::time::Duration) {
         self.telemetry
-            .durability_proof(crate::DurabilitySource::Object, waited);
+            .durability_proof(crate::node::log::DurabilitySource::Object, waited);
     }
 
+    /// Returns the control version the publisher last observed.
     #[must_use]
     pub fn control(&self) -> &VersionedControl {
         &self.observed
+    }
+
+    /// Returns the Cell storage layout this publisher writes through.
+    #[must_use]
+    pub(crate) fn layout(&self) -> &cellule_ltx::CellStorageLayout {
+        self.authority.layout()
     }
 
     pub(crate) fn renewal_due(&self, now: std::time::Instant) -> bool {
@@ -167,7 +183,7 @@ impl CellPublisher {
         self.check_node_lease()?;
         let deadline = std::time::Instant::now() + SELF_FENCE_TIMEOUT;
         let deadline_at = tokio::time::Instant::from_std(deadline);
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().renew()?;
@@ -220,7 +236,7 @@ impl CellPublisher {
     // Reconcile a lost activation CAS before exposing the restored handle.
     pub(crate) async fn activate(&mut self) -> Result<()> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().activate()?;
@@ -267,14 +283,17 @@ impl CellPublisher {
 
     pub(crate) async fn prepare(
         &mut self,
-        pending: &crate::PendingCommit,
+        pending: &crate::cell::executor::PendingCommit,
     ) -> Result<cellule_ltx::PreparedRoot> {
-        self.prepare_append(
-            pending.cuts(),
-            pending.outcome().commit_sequence(),
-            self.observed.value().schema,
-        )
-        .await
+        let result = self
+            .prepare_append(
+                pending.cuts(),
+                pending.outcome().commit_sequence(),
+                self.observed.value().schema,
+            )
+            .await;
+        self.record_publication_cost();
+        result
     }
 
     pub(crate) async fn prepare_initial(
@@ -284,9 +303,11 @@ impl CellPublisher {
         if self.observed.value().root.is_some() {
             return Err(Error::Control("bootstrap control already has a root"));
         }
-        let prepared = self
+        let result = self
             .prepare_cuts(None, cuts, 0, self.observed.value().schema)
-            .await?;
+            .await;
+        self.record_publication_cost();
+        let prepared = result?;
         self.note_append(&prepared);
         Ok(prepared)
     }
@@ -294,17 +315,32 @@ impl CellPublisher {
     /// Prepares the captured cut under its registry-selected target schema.
     pub async fn prepare_migration(
         &mut self,
-        pending: &crate::PendingMigration,
+        pending: &crate::cell::executor::PendingMigration,
     ) -> Result<cellule_ltx::PreparedRoot> {
         if self.observed.value().schema != pending.from_schema() {
             return Err(Error::Fenced);
         }
-        self.prepare_append(
-            pending.cuts(),
-            pending.commit_sequence(),
-            pending.to_schema(),
-        )
-        .await
+        let result = self
+            .prepare_append(
+                pending.cuts(),
+                pending.commit_sequence(),
+                pending.to_schema(),
+            )
+            .await;
+        self.record_publication_cost();
+        result
+    }
+
+    /// Reports the immutable cost of the last preparation attempt.
+    ///
+    /// The ledger is drained on every attempt, including failed ones, so a
+    /// provider retry loop that uploads objects before failing is visible as
+    /// cost instead of silently disappearing.
+    fn record_publication_cost(&self) {
+        let cost = self.replica.take_publication_cost();
+        if cost.objects > 0 {
+            self.telemetry.publication_cost(cost.objects, cost.bytes);
+        }
     }
 
     async fn prepare_append(
@@ -402,7 +438,7 @@ impl CellPublisher {
         &mut self,
         base: &cellule_ltx::RootRef,
     ) -> Result<Option<cellule_ltx::PreparedRoot>> {
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let replica = self.replica.clone();
             let scratch_directory = self.scratch_directory.clone();
@@ -416,6 +452,7 @@ impl CellPublisher {
                     }
                 }
             };
+            self.record_publication_cost();
             match result {
                 Ok(prepared) => return Ok(prepared),
                 Err(error) if retryable_ltx_error(&error) => {
@@ -437,7 +474,7 @@ impl CellPublisher {
             return Ok(None);
         }
         tracing::debug!(segments = segment_count, "Cell LTX full compaction forced");
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         let prepared = loop {
             let replica = self.replica.clone();
             let scratch_directory = self.scratch_directory.clone();
@@ -451,6 +488,7 @@ impl CellPublisher {
                     }
                 }
             };
+            self.record_publication_cost();
             match result {
                 Ok(prepared) => break prepared,
                 Err(error) if retryable_ltx_error(&error) => {
@@ -472,7 +510,7 @@ impl CellPublisher {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<cellule_ltx::PreparedRoot> {
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let replica = self.replica.clone();
             let attempt = replica.prepare(base, cuts, commit_sequence, schema);
@@ -522,7 +560,7 @@ impl CellPublisher {
         migration: Option<(crate::Digest, u32)>,
     ) -> Result<cellule_ltx::RootRef> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let (successor, transition) = match migration {
@@ -614,7 +652,7 @@ impl CellPublisher {
     /// Releases ownership after the SQL worker has closed the drained Cell.
     pub(crate) async fn release(&mut self) -> Result<()> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().release()?;
@@ -667,7 +705,7 @@ impl CellPublisher {
         let expected_cell = expected.cell;
         let expected_incarnation = expected.incarnation;
         let expected_epoch = expected.epoch;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         let current = loop {
             match self.authority.load(expected_cell).await {
                 Ok(Some(current)) => break current,
@@ -691,7 +729,7 @@ impl CellPublisher {
         if value.root.is_none()
             || !matches!(
                 value.state,
-                crate::ControlState::Recovering | crate::ControlState::Serving
+                crate::control::ControlState::Recovering | crate::control::ControlState::Serving
             )
         {
             return Err(Error::Control(
@@ -714,17 +752,17 @@ pub(crate) struct PendingDurability {
     durability: std::sync::Arc<NodeDurability>,
     ticket: CommitTicket,
     submitted_at: std::time::Instant,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl PendingDurability {
-    pub(crate) async fn prove(&self) -> Result<()> {
+    pub(crate) async fn prove(&self) -> Result<crate::node::log::DurabilitySource> {
         let proof = self.durability.prove(self.ticket).await?;
-        if proof.source() == crate::DurabilitySource::Fleet {
+        if proof.source() == crate::node::log::DurabilitySource::Fleet {
             self.telemetry
                 .durability_proof(proof.source(), self.submitted_at.elapsed());
         }
-        Ok(())
+        Ok(proof.source())
     }
 
     pub(crate) async fn prove_fleet(&self) -> Result<()> {
@@ -749,6 +787,8 @@ impl CellDurabilitySubmitter {
         cuts: &cellule_ltx::CaptureBatch,
     ) -> Result<Option<PendingDurability>> {
         let Some(slot) = self.node_durability.as_ref() else {
+            self.telemetry
+                .durability_submission(DurabilitySubmissionOutcome::Unsupported);
             return Ok(None);
         };
         let Some((application, durability)) = slot
@@ -756,6 +796,8 @@ impl CellDurabilitySubmitter {
             .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?
             .clone()
         else {
+            self.telemetry
+                .durability_submission(DurabilitySubmissionOutcome::Unavailable);
             return Ok(None);
         };
         self.check_node_lease()?;
@@ -769,11 +811,23 @@ impl CellDurabilitySubmitter {
         )?;
         let ticket = match durability.submit(submission).await {
             Ok(ticket) => ticket,
-            Err(_) => {
+            Err(error) => {
                 self.check_node_lease()?;
+                // The commit still succeeds through object coverage, so this
+                // event and its counter are the only way to observe that an
+                // enrolled lane refused the captured commit.
+                tracing::warn!(
+                    cell = %encode_hex(self.cell.as_bytes()),
+                    error = %error,
+                    "node-log submission rejected; using object coverage"
+                );
+                self.telemetry
+                    .durability_submission(DurabilitySubmissionOutcome::Rejected);
                 return Ok(None);
             }
         };
+        self.telemetry
+            .durability_submission(DurabilitySubmissionOutcome::Fleet);
         Ok(Some(PendingDurability {
             durability: std::sync::Arc::clone(&durability),
             ticket,
@@ -797,223 +851,21 @@ fn retryable_publication_error(error: &Error) -> bool {
 }
 
 fn retryable_ltx_error(error: &cellule_ltx::LtxError) -> bool {
-    matches!(
-        error,
-        cellule_ltx::LtxError::Storage(error)
-            if retryable_storage_error(error)
-    )
+    // The failure class is the retry contract; no sender decides from the
+    // error's shape or message.
+    error.classify().is_retryable()
 }
 
 fn runtime_retry_hint(error: &Error) -> Option<std::time::Duration> {
     let Error::Storage(error) = error else {
         return None;
     };
-    storage_retry_hint(error)
+    retry_hint(error)
 }
 
 fn ltx_retry_hint(error: &cellule_ltx::LtxError) -> Option<std::time::Duration> {
-    let cellule_ltx::LtxError::Storage(error) = error else {
-        return None;
-    };
-    storage_retry_hint(error)
-}
-
-fn storage_retry_hint(error: &cellule_store::StorageError) -> Option<std::time::Duration> {
-    match cellule_store::retry_class(error) {
-        cellule_store::RetryClass::Throttled { retry_after } => retry_after,
-        _ => None,
-    }
-}
-
-fn retryable_storage_error(error: &cellule_store::StorageError) -> bool {
-    matches!(
-        cellule_store::retry_class(error),
-        cellule_store::RetryClass::Transient
-            | cellule_store::RetryClass::Throttled { .. }
-            | cellule_store::RetryClass::StateDependent
-            | cellule_store::RetryClass::InspectErrno
-    )
-}
-
-struct PublicationBackoff {
-    delay_ms: u64,
-}
-
-impl Default for PublicationBackoff {
-    fn default() -> Self {
-        Self { delay_ms: 100 }
-    }
-}
-
-impl PublicationBackoff {
-    async fn wait(&mut self, minimum: Option<std::time::Duration>) {
-        let delay = std::time::Duration::from_millis(self.delay_ms);
-        tokio::time::sleep(minimum.map_or(delay, |minimum| minimum.max(delay))).await;
-        self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
-    }
-
-    async fn wait_until(
-        &mut self,
-        minimum: Option<std::time::Duration>,
-        deadline: std::time::Instant,
-    ) -> Result<()> {
-        let delay = std::time::Duration::from_millis(self.delay_ms);
-        let delay = minimum.map_or(delay, |minimum| minimum.max(delay));
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .ok_or(Error::Fenced)?;
-        if delay >= remaining {
-            return Err(Error::Fenced);
-        }
-        tokio::time::sleep(delay).await;
-        self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
-        Ok(())
-    }
+    error.classify().retry_after()
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use cellule_ltx::{CaptureBatch, CellReplica, CellStorageLayout, Db, Limits};
-    use cellule_store::Store;
-    use object_store::{memory::InMemory, path::Path};
-
-    use super::CellPublisher;
-    use crate::{CellAuthority, CellId, Control, Digest, IncarnationId, Owner, SessionId};
-
-    #[tokio::test]
-    async fn quiet_compaction_publishes_exact_root_after_eight_appends() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database =
-            Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
-        let cell = CellId::from_bytes([41; 32]);
-        let incarnation = IncarnationId::from_bytes([42; 16]);
-        let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            Path::from("quiet-compaction"),
-            [43; 16],
-        );
-        let replica = CellReplica::new(
-            layout.clone(),
-            *cell.as_bytes(),
-            *incarnation.as_bytes(),
-            Limits::default(),
-        )
-        .unwrap();
-        let control = Control::initial(
-            cell,
-            incarnation,
-            Owner {
-                session: SessionId::from_bytes([44; 16]),
-                endpoint: "https://node.internal:8081".into(),
-            },
-            Digest::from_bytes([45; 32]),
-            1,
-        )
-        .unwrap();
-        layout
-            .store()
-            .create_strict(
-                &layout.control_path(cell.as_bytes()),
-                Bytes::from(control.encode().unwrap()),
-            )
-            .await
-            .unwrap();
-        let authority = CellAuthority::new(layout);
-        let observed = authority.load(cell).await.unwrap().unwrap();
-        let mut publisher = CellPublisher::new(
-            replica.clone(),
-            authority,
-            observed,
-            directory.path().to_owned(),
-        );
-        for sequence in 1..=8_u64 {
-            database
-                .transaction(|transaction| {
-                    if sequence == 1 {
-                        transaction
-                            .execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY)")?;
-                    }
-                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence])?;
-                    Ok(())
-                })
-                .unwrap();
-            let cuts = database.capture_deferred().unwrap();
-            let prepared = publisher.prepare_append(&cuts, sequence, 1).await.unwrap();
-            publisher.publish_prepared(&prepared, None).await.unwrap();
-        }
-        assert!(publisher.compaction_due());
-        let before = publisher.control().value().ltx_root().unwrap();
-        assert_eq!(replica.open_root(&before).await.unwrap().segment_count(), 8);
-        assert_eq!(publisher.compact_one_quiet().await.unwrap(), Some(true));
-        let after = publisher.control().value().ltx_root().unwrap();
-        assert_eq!(after.position, before.position);
-        assert_eq!(after.commit_sequence, before.commit_sequence);
-        assert_eq!(replica.open_root(&after).await.unwrap().segment_count(), 1);
-        assert_eq!(publisher.compact_one_quiet().await.unwrap(), Some(false));
-        assert!(!publisher.compaction_due());
-
-        let mut segments = Vec::new();
-        let mut position = after.position;
-        for sequence in 9..=10_u64 {
-            database
-                .transaction(|transaction| {
-                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence])?;
-                    Ok(())
-                })
-                .unwrap();
-            let captured = database.capture_deferred().unwrap();
-            segments.extend(captured.segments);
-            position = captured.position;
-        }
-        let cuts = CaptureBatch {
-            segments,
-            position,
-            timing: Default::default(),
-        };
-        assert_eq!(cuts.segments.len(), 2);
-        let prepared = publisher.prepare_append(&cuts, 9, 1).await.unwrap();
-        publisher.publish_prepared(&prepared, None).await.unwrap();
-        let extended = publisher.control().value().ltx_root().unwrap();
-        assert_eq!(extended.position, position);
-        assert_eq!(
-            replica.open_root(&extended).await.unwrap().segment_count(),
-            3
-        );
-
-        for sequence in 10..=37_u64 {
-            database
-                .transaction(|transaction| {
-                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence + 1])?;
-                    Ok(())
-                })
-                .unwrap();
-            let cuts = database.capture_deferred().unwrap();
-            let prepared = publisher.prepare_append(&cuts, sequence, 1).await.unwrap();
-            publisher.publish_prepared(&prepared, None).await.unwrap();
-        }
-        let at_ceiling = publisher.control().value().ltx_root().unwrap();
-        assert_eq!(
-            replica
-                .open_root(&at_ceiling)
-                .await
-                .unwrap()
-                .segment_count(),
-            31
-        );
-        database
-            .transaction(|transaction| {
-                transaction.execute("INSERT INTO events VALUES (39)", [])?;
-                Ok(())
-            })
-            .unwrap();
-        let cuts = database.capture_deferred().unwrap();
-        let prepared = publisher.prepare_append(&cuts, 38, 1).await.unwrap();
-        publisher.publish_prepared(&prepared, None).await.unwrap();
-        let forced = publisher.control().value().ltx_root().unwrap();
-        assert!(replica.open_root(&forced).await.unwrap().segment_count() < 32);
-        database.close().unwrap();
-    }
-}
+mod tests;

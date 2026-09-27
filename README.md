@@ -1,6 +1,19 @@
 # Cellule
 
-Cellule is an embedded Rust framework for distributed applications whose state is partitioned into SQLite-backed Cells. A Cell has one fenced writer, a durable control record, immutable LTX history in object storage, and an exact recovery root. Applications register statically linked modules and invoke typed commands and queries. The embedding service owns network endpoints, authentication, cloud credentials, and deployment policy.
+Cellule is an embedded Rust framework for SQLite-backed distributed Cells.
+Each Cell has one fenced writer, durable authority, immutable LTX history, and
+an exact recovery root. Services supply ingress, authorization, and credentials.
+
+```mermaid
+flowchart LR
+    Application[Typed application] --> Host[Cellule host]
+    Host --> Runtime[Cell runtime]
+    Runtime --> SQLite[Managed SQLite]
+    Runtime --> LTX[LTX publication]
+    LTX --> Objects[Object storage]
+    Runtime --> Authority[Owner and root CAS]
+```
+
 
 The source repository is public. The crates publish to crates.io as a matched
 `cellule-*` set; see the [release guide](docs/releasing.md) for the packaging
@@ -16,9 +29,10 @@ workspace checkout.
 | Persistence | [cellule-ltx](crates/cellule-ltx/README.md) | Managed SQLite WAL capture, verified LTX recovery, immutable Cell roots, and sparse reads. Remote replication requires the `replica` feature. |
 | Coordination and execution | [cellule-runtime](crates/cellule-runtime/README.md) | Cell identities, owner fencing, authority CAS, SQL execution, durable outcomes, and distributed primitives. |
 | Application | [cellule-app](crates/cellule-app/README.md) | Module registration, stable topology, and typed author handles. |
+| Peer transport | [cellule-peer-http](crates/cellule-peer-http/README.md) | Optional owner-resolving HTTP transport and pinned mTLS; the service owns ingress and authorization. |
 | Host | [cellule-host](crates/cellule-host/README.md) | One-runtime node lifecycle, resource admission, drain, and shutdown. |
 
-The dependencies point downward: `host → app → runtime → ltx → store → types`. `host` also uses runtime directly. No crate depends on Crab, Git, or an HTTP server.
+The dependencies point downward: `host → app → runtime → ltx → store → types`. `host` also uses runtime directly. No crate depends on Crab or Git. The optional peer HTTP adapter depends on runtime contracts and HTTP/TLS libraries; lower layers remain transport-neutral.
 
 ## How a write becomes durable
 
@@ -39,13 +53,23 @@ cargo test --workspace --locked
 cargo test -p cellule-ltx --features replica --locked
 ```
 
-Start with the [runnable reference application guide](docs/quickstart.md). Its standalone SQL orders, KV carts, Queue notifications, Workflow/Activity fulfillment, and Cron/Effect invoice delivery examples lead into a storefront smoke that also covers Blob attachments. The [reference application source](crates/cellule-app/tests/reference_application.rs) is compiled and exercised in CI. See [architecture](docs/architecture.md) for ownership rules, [embedding and deployment](docs/embedding.md) for node startup and shutdown, [qualification](crates/cellule-runtime/qualification/README.md) for evidence requirements, and [performance examples](crates/cellule-app/PERFORMANCE.md) for measured local workloads. `cellule-ltx` retains its [upstream attribution](crates/cellule-ltx/UPSTREAM.md) and bundled licenses.
+Start with the [orders example and reference application guide](docs/quickstart.md).
+The orders example commits and reads a published SQL value. The reference
+application exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect,
+then restores published state under a successor owner. See [architecture](docs/architecture.md),
+[embedding](docs/embedding.md), [qualification](crates/cellule-runtime/qualification/README.md),
+and [performance scenarios](crates/cellule-app/PERFORMANCE.md).
+LTX retains its [upstream attribution](crates/cellule-ltx/UPSTREAM.md) and licenses.
 
 ## Integration
 
 Cellule is developed and tested as a separate workspace. An embedding service supplies its own storage provider, application modules, network transport, and authentication. The architecture document defines the crate boundaries, and the [runtime design notes](crates/cellule-runtime/docs/README.md) carry the mechanics that were synthesized from Crab.
 
-The [Crab synthesis ledger](docs/synthesis.md) records the synced revision, the crate mapping, and the deliberate adaptations.
+The [primitive roadmap](docs/roadmap.md) records the supported framework surface and remaining integration and qualification work.
+
+The [Crab synthesis ledger](docs/synthesis.md) records the synced revision, mapping,
+and adaptations. The [verification report](docs/verification.md) records the
+checks performed for this refresh.
 
 ## Contribute
 

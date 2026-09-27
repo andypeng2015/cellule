@@ -38,28 +38,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cellule-ltx"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "crc-fast",
- "lz4_flex",
- "rusqlite",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "cellule-ltx-perf-cellule"
-version = "0.1.0"
-dependencies = [
- "cellule-ltx",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,6 +56,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "cellule-ltx"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crc-fast",
+ "lz4_flex",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "cellule-ltx-perf-crab"
+version = "0.1.0"
+dependencies = [
+ "cellule-ltx",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

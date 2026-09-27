@@ -4,6 +4,8 @@ use crate::{Limits, LtxError, Result, SegmentInfo};
 
 use super::{MAX_SEGMENT_PAGES, ROOT_BYTES, SEGMENT_PAGE_BYTES};
 
+use crate::hex::encode_hex;
+
 #[derive(Clone)]
 pub(super) struct RootDocument {
     pub cell: [u8; 32],
@@ -186,28 +188,42 @@ pub(super) fn encode_root(root: &RootDocument) -> Result<Vec<u8>> {
         return Err(LtxError::LTXCorrupted);
     }
     let bytes = serde_json::to_vec(&RootWire {
-        cell: hex(&root.cell),
+        cell: encode_hex(&root.cell),
         checksum: checksum(root.checksum),
         commit_sequence: root.commit_sequence.to_string(),
         database_pages: root.database_pages,
-        directory_digest: hex(&root.directory_digest),
+        directory_digest: encode_hex(&root.directory_digest),
         directory_height: root.directory_height,
-        incarnation: hex(&root.incarnation),
+        incarnation: encode_hex(&root.incarnation),
         page_size: root.page_size,
         schema: root.schema,
-        segment_pages: root.segment_pages.iter().map(|value| hex(value)).collect(),
+        segment_pages: root
+            .segment_pages
+            .iter()
+            .map(|value| encode_hex(value))
+            .collect(),
         txid: root.txid.to_string(),
         version: 1,
     })?;
     if bytes.len() as u64 > ROOT_BYTES {
-        return Err(LtxError::Limit("Cell root bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::CellRootBytes));
     }
     Ok(bytes)
 }
 
+/// Decodes one root document and reports its descriptor-page count.
+pub(crate) fn inspect_root(bytes: &[u8]) -> Result<usize> {
+    Ok(decode_root(bytes)?.segment_pages.len())
+}
+
+/// Decodes one root descriptor page and reports its descriptor count.
+pub(crate) fn inspect_segment_page(bytes: &[u8]) -> Result<usize> {
+    Ok(decode_segment_page(bytes)?.len())
+}
+
 pub(super) fn decode_root(bytes: &[u8]) -> Result<RootDocument> {
     if bytes.len() as u64 > ROOT_BYTES {
-        return Err(LtxError::Limit("Cell root bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::CellRootBytes));
     }
     let wire: RootWire = serde_json::from_slice(bytes)?;
     if wire.version != 1 {
@@ -240,15 +256,15 @@ pub(super) fn encode_segment_page(segments: &[SegmentDescriptor]) -> Result<Vec<
     let wire = segments
         .iter()
         .map(|segment| SegmentWire {
-            blake3: hex(&segment.info.blake3),
+            blake3: encode_hex(&segment.info.blake3),
             database_pages: segment.info.database_pages,
-            index_digest: hex(&segment.index_digest),
+            index_digest: encode_hex(&segment.index_digest),
             index_length: segment.index_length.to_string(),
             length: segment.length.to_string(),
             level: segment.level,
             max_txid: segment.info.max_txid.to_string(),
             min_txid: segment.info.min_txid.to_string(),
-            object_digest: hex(&segment.object_digest),
+            object_digest: encode_hex(&segment.object_digest),
             offset: segment.offset.to_string(),
             page_size: segment.info.page_size,
             post_checksum: checksum(segment.info.post_checksum),
@@ -258,14 +274,14 @@ pub(super) fn encode_segment_page(segments: &[SegmentDescriptor]) -> Result<Vec<
         .collect::<Vec<_>>();
     let bytes = serde_json::to_vec(&wire)?;
     if bytes.len() as u64 > SEGMENT_PAGE_BYTES {
-        return Err(LtxError::Limit("Cell segment page bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::CellSegmentPageBytes));
     }
     Ok(bytes)
 }
 
 pub(super) fn decode_segment_page(bytes: &[u8]) -> Result<Vec<SegmentDescriptor>> {
     if bytes.len() as u64 > SEGMENT_PAGE_BYTES {
-        return Err(LtxError::Limit("Cell segment page bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::CellSegmentPageBytes));
     }
     let wire: Vec<SegmentWire> = serde_json::from_slice(bytes)?;
     let segments = wire
@@ -321,16 +337,6 @@ fn parse_checksum(value: &str) -> Result<u64> {
     u64::from_str_radix(value, 16).map_err(|_| LtxError::LTXCorrupted)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
 fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
     if value.len() != N * 2
         || value
@@ -372,6 +378,41 @@ mod tests {
             segment_pages: vec![[4; 32]],
             txid: 2,
         }
+    }
+
+    #[test]
+    fn encode_root_accepts_the_segment_page_ceiling() {
+        let mut document = root();
+        document.segment_pages = vec![[4; 32]; super::super::MAX_SEGMENT_PAGES];
+        assert!(encode_root(&document).is_ok());
+    }
+
+    #[test]
+    fn encode_root_rejects_more_than_the_segment_page_ceiling() {
+        let mut document = root();
+        document.segment_pages = vec![[4; 32]; super::super::MAX_SEGMENT_PAGES + 1];
+        assert!(matches!(
+            encode_root(&document),
+            Err(LtxError::LTXCorrupted)
+        ));
+    }
+
+    #[test]
+    fn decode_root_rejects_a_body_past_the_root_bound() {
+        let oversized = vec![b' '; super::super::ROOT_BYTES as usize + 1];
+        assert!(matches!(
+            decode_root(&oversized),
+            Err(LtxError::Limit(crate::LimitKind::CellRootBytes))
+        ));
+    }
+
+    #[test]
+    fn decode_segment_page_rejects_a_body_past_the_page_bound() {
+        let oversized = vec![b' '; super::super::SEGMENT_PAGE_BYTES as usize + 1];
+        assert!(matches!(
+            decode_segment_page(&oversized),
+            Err(LtxError::Limit(crate::LimitKind::CellSegmentPageBytes))
+        ));
     }
 
     #[test]

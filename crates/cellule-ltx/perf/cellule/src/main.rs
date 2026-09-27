@@ -4,7 +4,7 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Instant;
 
-const CELLULE_SOURCE: &str = "workspace cellule-ltx";
+const CRAB_SOURCE: &str = "workspace cellule-ltx";
 
 #[derive(Debug, Clone, Copy)]
 struct Config {
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let report = Report {
         implementation: "cellule-ltx",
-        source: CELLULE_SOURCE,
+        source: CRAB_SOURCE,
         config: ConfigOutput {
             transactions: config.transactions,
             payload_bytes: config.payload_bytes,

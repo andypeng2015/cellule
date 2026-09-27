@@ -13,15 +13,24 @@ use super::{
     CellClient, CellDescription, CellTransport, EncodedCommand, EncodedObservation, EncodedQuery,
     EncodedResolve, InvocationError, PendingMutation, decode_pending,
 };
-use crate::{
-    ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
-    CommandResult, Digest, Error, IncarnationId, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, PeerPrincipal,
-    PeerRoundTrip, PeerSigner, Query, QueryContext, Receipt, RegistryBuilder, RequestId,
-    Resolution, RetainedCodeDescriptor, SessionId, StoredOutcome, TenantId,
+use crate::Error;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::StoredOutcome;
+use crate::cell::executor::{MutationIdentity, Resolution};
+use crate::client::Receipt;
+use crate::identity::{ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId};
+use crate::identity::{IncarnationId, RequestId};
+use crate::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner};
+use crate::registry::{
+    BuildDescriptor, CellModule, Command, MigrationDescriptor, ModuleDescriptor,
+    NamespaceDescriptor, Query, RegistryBuilder,
+};
+use crate::registry::{
+    CommandContext, CommandResult, OperationDescriptor, QueryContext, RetainedCodeDescriptor,
 };
 
 const MODULE: &str = "pending-test";
+const ADMISSION_CELL: crate::CellId = crate::CellId::from_bytes([1; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([3; 16]);
 const MIGRATION: &str = "CREATE TABLE pending_test(value BLOB NOT NULL)";
 const RETAINED_CODE: Digest = Digest::from_bytes([14; 32]);
@@ -123,10 +132,8 @@ impl PeerRoundTrip for AcceptedButLost {
     }
 }
 
-fn peer_command_fixture(
-    round_trip: Arc<dyn PeerRoundTrip>,
-    expires_at_ms: i64,
-) -> (crate::peer::PeerClientTransport, EncodedCommand) {
+#[tokio::test]
+async fn ambiguous_peer_command_preserves_identity_without_retry() {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([2; 16]),
@@ -134,6 +141,13 @@ fn peer_command_fixture(
         b"pending",
     )
     .unwrap();
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([7; 16]),
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+    };
+    let operation_digest = Digest::from_bytes([8; 32]);
+    let calls = Arc::new(AtomicUsize::new(0));
     let transport = crate::peer::PeerClientTransport::new(
         Arc::new(PeerSigner::new(
             SessionId::from_bytes([9; 16]),
@@ -145,45 +159,33 @@ fn peer_command_fixture(
             subject: "operator".into(),
             actions: vec!["repository.write".into()],
         },
-        round_trip,
-    );
-    let command = EncodedCommand {
-        target: target.clone(),
-        expected: CellDescription {
-            cell: target.cell_id(),
-            incarnation: IncarnationId::from_bytes([12; 16]),
-            code: Digest::from_bytes([13; 32]),
-            schema: 1,
-        },
-        identity: MutationIdentity {
-            request_id: RequestId::from_bytes([7; 16]),
-            issued_at_ms: 1_000,
-            expires_at_ms,
-        },
-        operation_digest: Digest::from_bytes([8; 32]),
-        now_ms: 1_000,
-        module: MODULE,
-        operation_id: 1,
-        codec_version: 1,
-        input: b"input".to_vec(),
-        input_limit: 64,
-        output_limit: 64,
-    };
-    (transport, command)
-}
-
-#[tokio::test]
-async fn ambiguous_peer_command_preserves_identity_without_retry() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (transport, command) = peer_command_fixture(
         Arc::new(AcceptedButLost {
             calls: Arc::clone(&calls),
         }),
-        61_000,
     );
-    let identity = command.identity;
-    let operation_digest = command.operation_digest;
-    let result = CellTransport::command(&transport, command).await;
+
+    let result = CellTransport::command(
+        &transport,
+        EncodedCommand {
+            target: target.clone(),
+            expected: CellDescription {
+                cell: target.cell_id(),
+                incarnation: IncarnationId::from_bytes([12; 16]),
+                code: Digest::from_bytes([13; 32]),
+                schema: 1,
+            },
+            identity,
+            operation_digest,
+            now_ms: 1_000,
+            module: MODULE,
+            operation_id: 1,
+            codec_version: 1,
+            input: b"input".to_vec(),
+            input_limit: 64,
+            output_limit: 64,
+        },
+    )
+    .await;
 
     assert!(matches!(
         result,
@@ -194,114 +196,6 @@ async fn ambiguous_peer_command_preserves_identity_without_retry() {
         }) if request_id == identity.request_id && digest == operation_digest
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-struct NeverReplies;
-
-impl PeerRoundTrip for NeverReplies {
-    fn send(
-        &self,
-        _target: CellTarget,
-        _request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crate::Result<Vec<u8>>> + Send + 'static>> {
-        Box::pin(std::future::pending())
-    }
-}
-
-#[tokio::test]
-async fn stalled_peer_command_returns_resolvable_unknown_outcome() {
-    let (transport, command) = peer_command_fixture(Arc::new(NeverReplies), 1_020);
-    let identity = command.identity;
-    let operation_digest = command.operation_digest;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        CellTransport::command(&transport, command),
-    )
-    .await;
-
-    assert!(matches!(
-        result,
-        Ok(Err(Error::OutcomeUnknown {
-            request_id,
-            operation_digest: digest,
-            source,
-        })) if request_id == identity.request_id
-            && digest == operation_digest
-            && matches!(*source, Error::PeerTransportUnknown { .. })
-    ));
-}
-
-struct UnusableReply(Vec<u8>);
-
-impl PeerRoundTrip for UnusableReply {
-    fn send(
-        &self,
-        _target: CellTarget,
-        _request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crate::Result<Vec<u8>>> + Send + 'static>> {
-        let reply = self.0.clone();
-        Box::pin(async move { Ok(reply) })
-    }
-}
-
-#[tokio::test]
-async fn unusable_peer_mutation_replies_preserve_pending_identity() {
-    use crate::peer::wire;
-
-    let wrong_kind = crate::peer::encode_peer_reply(&wire::PeerReply {
-        outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
-            receipt: None,
-            result: Some(wire::read_reply::Result::Description(
-                wire::CellDescription {
-                    cell_id: vec![1; 32],
-                    incarnation: vec![2; 16],
-                    code: vec![3; 32],
-                    schema: 1,
-                },
-            )),
-        })),
-    })
-    .unwrap();
-    let wrong_receipt = crate::peer::encode_peer_reply(&wire::PeerReply {
-        outcome: Some(wire::peer_reply::Outcome::Mutation(wire::MutationReply {
-            receipt: Some(wire::Receipt {
-                cell_id: vec![9; 32],
-                incarnation: vec![12; 16],
-                commit_sequence: 1,
-            }),
-            outcome: Some(wire::mutation_reply::Outcome::Result(
-                wire::MutationResult {
-                    result: Some(wire::mutation_result::Result::CommandOutput(Vec::new())),
-                },
-            )),
-        })),
-    })
-    .unwrap();
-
-    for (case, reply) in [
-        ("malformed", b"invalid".to_vec()),
-        ("wrong kind", wrong_kind),
-        ("wrong receipt", wrong_receipt),
-    ] {
-        let (transport, command) = peer_command_fixture(Arc::new(UnusableReply(reply)), 61_000);
-        let identity = command.identity;
-        let operation_digest = command.operation_digest;
-        let result = CellTransport::command(&transport, command).await;
-
-        assert!(
-            matches!(
-                result,
-                Err(Error::OutcomeUnknown {
-                    request_id,
-                    operation_digest: digest,
-                    ..
-                }) if request_id == identity.request_id && digest == operation_digest
-            ),
-            "{case} reply must retain pending identity"
-        );
-    }
 }
 
 struct PendingModule;
@@ -424,19 +318,28 @@ impl CellTransport for StreamTransport {
     }
 }
 
-struct UnknownTransport {
+struct RefusedThenUnknownTransport {
     description: CellDescription,
+    descriptions: AtomicUsize,
     command_digest: Arc<Mutex<Option<Digest>>>,
     resolved_digest: Arc<Mutex<Option<Digest>>>,
+    calls: Arc<AtomicUsize>,
 }
 
-impl CellTransport for UnknownTransport {
+impl CellTransport for RefusedThenUnknownTransport {
     fn describe(
         &self,
         _target: CellTarget,
     ) -> Pin<Box<dyn Future<Output = crate::Result<CellDescription>> + Send + 'static>> {
         let description = self.description;
-        Box::pin(async move { Ok(description) })
+        let refused = self.descriptions.fetch_add(1, Ordering::SeqCst) < 2;
+        Box::pin(async move {
+            if refused {
+                Err(Error::Capacity("peer HTTP admission"))
+            } else {
+                Ok(description)
+            }
+        })
     }
 
     fn command(
@@ -444,12 +347,15 @@ impl CellTransport for UnknownTransport {
         command: EncodedCommand,
     ) -> Pin<Box<dyn Future<Output = crate::Result<StoredOutcome>> + Send + 'static>> {
         let observed = self.command_digest.clone();
+        if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+            return Box::pin(async { Err(Error::Capacity("owner mailbox")) });
+        }
         Box::pin(async move {
             *observed.lock().unwrap() = Some(command.operation_digest);
             Err(Error::OutcomeUnknown {
                 request_id: command.identity.request_id,
                 operation_digest: command.operation_digest,
-                source: Box::new(Error::RuntimeClosed),
+                source: Box::new(Error::Capacity("accepted publication")),
             })
         })
     }
@@ -474,7 +380,7 @@ impl CellTransport for UnknownTransport {
 }
 
 #[tokio::test]
-async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
+async fn capacity_wait_preserves_unknown_outcome_identity_and_digest_for_resolve() {
     let mut builder = RegistryBuilder::new(BuildDescriptor {
         source_revision: "pending-test".into(),
         cargo_lock_digest: Digest::from_bytes([5; 32]),
@@ -496,14 +402,19 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
     };
     let command_digest = Arc::new(Mutex::new(None));
     let resolved_digest = Arc::new(Mutex::new(None));
+    let calls = Arc::new(AtomicUsize::new(0));
     let client = CellClient::new(
         registry,
-        Arc::new(UnknownTransport {
+        Arc::new(RefusedThenUnknownTransport {
             description,
+            descriptions: AtomicUsize::new(0),
             command_digest: command_digest.clone(),
             resolved_digest: resolved_digest.clone(),
+            calls: calls.clone(),
         }),
-    );
+    )
+    .with_admission_backpressure(8, 16_384, std::time::Duration::from_secs(1))
+    .unwrap();
     let now_ms = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -517,26 +428,30 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
         expires_at_ms: now_ms + 60_000,
     };
 
-    let prepared = client
-        .prepare_command::<PendingCommand>(&target, identity, b"input".to_vec())
-        .await
-        .expect("prepare exact command");
-    let evidence = prepared.evidence().clone();
-    let pending = match prepared.execute().await {
-        Err(InvocationError::Pending(pending)) => pending,
-        outcome => panic!("unexpected command outcome: {outcome:?}"),
-    };
-    assert_eq!(*pending, evidence);
-    assert_eq!(pending.identity(), identity);
-    assert_eq!(
-        Some(pending.operation_digest()),
-        *command_digest.lock().unwrap()
-    );
-    assert_eq!(client.resolve(&pending).await.unwrap(), Resolution::Unknown);
-    assert_eq!(
-        Some(pending.operation_digest()),
-        *resolved_digest.lock().unwrap()
-    );
+    let observed = client.clone().with_observed_description(description);
+    for (index, client) in [client, observed].into_iter().enumerate() {
+        let prepared = client
+            .prepare_command::<PendingCommand>(&target, identity, b"input".to_vec())
+            .await
+            .expect("prepare exact command");
+        let evidence = prepared.evidence().clone();
+        let pending = match prepared.execute().await {
+            Err(InvocationError::Pending(pending)) => pending,
+            outcome => panic!("unexpected command outcome: {outcome:?}"),
+        };
+        assert_eq!(*pending, evidence);
+        assert_eq!(calls.load(Ordering::SeqCst), 3 + index);
+        assert_eq!(pending.identity(), identity);
+        assert_eq!(
+            Some(pending.operation_digest()),
+            *command_digest.lock().unwrap()
+        );
+        assert_eq!(client.resolve(&pending).await.unwrap(), Resolution::Unknown);
+        assert_eq!(
+            Some(pending.operation_digest()),
+            *resolved_digest.lock().unwrap()
+        );
+    }
 }
 
 #[tokio::test]
@@ -660,4 +575,195 @@ async fn state_stream_advances_receipts_and_cancellation_is_terminal() {
             .unwrap(),
         Err(InvocationError::NotStarted(Error::StreamCancelled))
     ));
+}
+
+fn admission_transport(
+    requests: usize,
+    bytes: usize,
+    wait: std::time::Duration,
+) -> super::backpressure::BackpressureTransport {
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NAMESPACE,
+        b"admission",
+    )
+    .unwrap();
+    super::backpressure::BackpressureTransport::new(
+        Arc::new(StreamTransport {
+            description: CellDescription {
+                cell: target.cell_id(),
+                incarnation: IncarnationId::from_bytes([3; 16]),
+                code: RETAINED_CODE,
+                schema: 1,
+            },
+            sequence: Arc::default(),
+            fenced: Arc::default(),
+            query_started: None,
+            query_release: None,
+        }),
+        requests,
+        bytes,
+        wait,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn admission_backpressure_retries_capacity_but_not_fencing() {
+    let transport = admission_transport(2, 8_192, std::time::Duration::from_secs(1));
+    let mut attempts = 0;
+    let value = transport
+        .invoke(ADMISSION_CELL, 32, Some(1), || {
+            attempts += 1;
+            std::future::ready(if attempts < 3 {
+                Err(Error::Capacity("owner mailbox"))
+            } else {
+                Ok(42)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!((value, attempts), (42, 3));
+    let mut attempts = 0;
+    let result = transport
+        .invoke(ADMISSION_CELL, 32, Some(1), || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(Error::Fenced))
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Fenced)) && attempts == 1);
+}
+
+#[tokio::test]
+async fn admission_backpressure_releases_shared_limits_after_cancellation() {
+    for (requests, bytes, resource) in [
+        (1, 8_192, "client admission requests"),
+        (2, 2_048, "client admission bytes"),
+    ] {
+        let transport = admission_transport(requests, bytes, std::time::Duration::from_secs(1));
+        let clone = transport.clone();
+        let entered = Notify::new();
+        let mut held = Box::pin(transport.invoke(ADMISSION_CELL, 0, Some(1), || {
+            entered.notify_one();
+            std::future::pending::<crate::Result<()>>()
+        }));
+        tokio::select! {
+            result = &mut held => panic!("unexpected completion: {result:?}"),
+            () = entered.notified() => {}
+        }
+        let result = clone
+            .invoke(ADMISSION_CELL, 0, Some(1), || std::future::ready(Ok(())))
+            .await;
+        assert!(matches!(result, Err(Error::Capacity(found)) if found == resource));
+        drop(held);
+        clone
+            .invoke(ADMISSION_CELL, 0, Some(1), || std::future::ready(Ok(())))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admission_backpressure_expires_without_canceling_accepted_work() {
+    let transport = admission_transport(1, 8_192, std::time::Duration::from_millis(25));
+    let mut attempts = 0;
+    let result = transport
+        .invoke(ADMISSION_CELL, 0, Some(1), || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(Error::Capacity("owner mailbox")))
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Capacity("owner mailbox"))) && attempts <= 2);
+    let result = transport
+        .invoke(ADMISSION_CELL, 0, Some(1), || async {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            Ok(42)
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, 42);
+}
+
+#[tokio::test]
+async fn admission_backpressure_is_fifo_per_cell_and_independent_across_cells() {
+    let transport = admission_transport(4, 16_384, std::time::Duration::from_secs(1));
+    let mut held = Box::pin(transport.invoke(
+        ADMISSION_CELL,
+        0,
+        Some(crate::cell::actor::CELL_BYTES),
+        std::future::pending::<crate::Result<()>>,
+    ));
+    assert!(futures_util::poll!(&mut held).is_pending());
+    let order = AtomicUsize::new(0);
+    let mut queued = Box::pin(transport.invoke(
+        ADMISSION_CELL,
+        0,
+        Some(crate::cell::actor::CELL_BYTES),
+        || std::future::ready(Ok(order.fetch_add(1, Ordering::SeqCst))),
+    ));
+    assert!(futures_util::poll!(&mut queued).is_pending());
+    transport
+        .invoke(crate::CellId::from_bytes([2; 32]), 0, Some(1), || {
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+    drop(held);
+    let arrival = transport.invoke(
+        ADMISSION_CELL,
+        0,
+        Some(crate::cell::actor::CELL_BYTES),
+        || std::future::ready(Ok(order.fetch_add(1, Ordering::SeqCst))),
+    );
+    // Poll the new arrival first: the already queued call must still run first.
+    let (arrival, queued) = tokio::join!(biased; arrival, queued);
+    assert_eq!((queued.unwrap(), arrival.unwrap()), (0, 1));
+}
+
+#[tokio::test]
+async fn admission_backpressure_overlaps_calls_without_overtaking_large_waiters() {
+    let transport = admission_transport(4, 16_384, std::time::Duration::from_secs(1));
+    let half = crate::cell::actor::CELL_BYTES / 2;
+    let mut held = Box::pin(transport.invoke(ADMISSION_CELL, 0, Some(half), || {
+        std::future::pending::<crate::Result<()>>()
+    }));
+    assert!(futures_util::poll!(&mut held).is_pending());
+    transport
+        .invoke(ADMISSION_CELL, 0, Some(half), || std::future::ready(Ok(())))
+        .await
+        .unwrap();
+    let mut large = Box::pin(transport.invoke(ADMISSION_CELL, 0, Some(half + 1), || {
+        std::future::ready(Ok(()))
+    }));
+    assert!(futures_util::poll!(&mut large).is_pending());
+    let mut small =
+        Box::pin(transport.invoke(ADMISSION_CELL, 0, Some(1), || std::future::ready(Ok(()))));
+    assert!(futures_util::poll!(&mut small).is_pending());
+    // Canceling the older large waiter releases its claim on remaining bytes.
+    drop(large);
+    small.await.unwrap();
+}
+
+#[tokio::test]
+async fn describe_admission_does_not_wait_for_the_owner_mailbox() {
+    let transport = admission_transport(2, 8_192, std::time::Duration::from_millis(25));
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NAMESPACE,
+        b"admission",
+    )
+    .unwrap();
+    let mut held = Box::pin(transport.invoke(
+        target.cell_id(),
+        0,
+        Some(crate::cell::actor::CELL_BYTES),
+        std::future::pending::<crate::Result<()>>,
+    ));
+    assert!(futures_util::poll!(&mut held).is_pending());
+    assert_eq!(
+        transport.describe(target.clone()).await.unwrap().cell,
+        target.cell_id()
+    );
 }

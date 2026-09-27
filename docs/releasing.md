@@ -1,8 +1,8 @@
 # Releasing Cellule
 
-The six workspace crates publish to crates.io as `cellule-types`,
+The seven workspace crates publish to crates.io as `cellule-types`,
 `cellule-store`, `cellule-ltx`, `cellule-runtime`, `cellule-app`, and
-`cellule-host`. They share one version: an embedding service depends on the
+`cellule-host`, and the optional `cellule-peer-http`. They share one version: an embedding service depends on the
 set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
 
 ## Before the first release
@@ -11,7 +11,7 @@ set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
    page was written):
 
    ```sh
-   for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host; do
+   for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host cellule-peer-http; do
      curl -s -A 'cellule-release-check' "https://crates.io/api/v1/crates/$crate" \
        | grep -q 'does not exist' && echo "$crate: free" || echo "$crate: TAKEN"
    done
@@ -22,11 +22,13 @@ set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
    ```sh
    cargo fmt --all --check
    cargo check --workspace --all-targets --locked
-   cargo test --workspace --locked
+   cargo test --workspace --all-features --locked
    cargo test -p cellule-ltx --features replica --locked
    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
    python3 scripts/check-boundaries.py
+   python3 scripts/check-cell-ltx-layout.py
+   python3 scripts/check-doc-rust-fences.py
    node crates/cellule-runtime/docs/validate.mjs
    ```
 
@@ -48,6 +50,7 @@ cargo publish -p cellule-ltx
 cargo publish -p cellule-runtime
 cargo publish -p cellule-app
 cargo publish -p cellule-host
+cargo publish -p cellule-peer-http
 ```
 
 Wait for each crate to appear in the registry index before publishing the next

@@ -2,6 +2,8 @@ use object_store::path::Path;
 
 use cellule_store::Store;
 
+use crate::hex::encode_hex;
+
 /// Typed physical paths for one application's SQLite Cell objects.
 #[derive(Clone)]
 pub struct CellStorageLayout {
@@ -13,10 +15,15 @@ pub struct CellStorageLayout {
 /// Immutable object kinds accepted below one Cell incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CellObjectKind {
+    /// Immutable LTX segment.
     Ltx,
+    /// Capture index beside one segment.
     Index,
+    /// Root directory page.
     Directory,
+    /// Published root record.
     Root,
+    /// Recovery bundle.
     Bundle,
 }
 
@@ -43,11 +50,13 @@ impl CellStorageLayout {
         }
     }
 
+    /// Returns the transport every path in this layout writes through.
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
     }
 
+    /// Returns the application ID every application-scoped path is bound to.
     #[must_use]
     pub const fn application_id(&self) -> &[u8; 16] {
         &self.application
@@ -59,6 +68,7 @@ impl CellStorageLayout {
         self.store.immutable_cache_identity()
     }
 
+    /// Returns the application identity path.
     #[must_use]
     pub fn identity_path(&self) -> Path {
         Self::root_identity_path(&self.root)
@@ -70,31 +80,43 @@ impl CellStorageLayout {
         Path::from(format!("{root}/cells/v1/identity.json"))
     }
 
+    /// Returns the current release pointer path.
     #[must_use]
     pub fn release_path(&self) -> Path {
         self.application_path("release.json")
     }
 
+    /// Returns the application-scoped prefix every Cell path shares.
     #[must_use]
     pub fn application_prefix(&self) -> Path {
         self.application_path("")
     }
 
+    /// Returns the catalog pin prefix.
     #[must_use]
     pub fn pin_prefix(&self) -> Path {
         self.application_path("pins")
     }
 
+    /// Returns the release descriptor path for one digest.
     #[must_use]
     pub fn release_descriptor_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("releases/{}.json", hex(digest)))
+        self.application_path(&format!("releases/{}.json", encode_hex(digest)))
     }
 
+    /// Returns the control record path for one Cell.
     #[must_use]
     pub fn control_path(&self, cell: &[u8; 32]) -> Path {
-        self.application_path(&format!("cells/{}/control.json", hex(cell)))
+        self.application_path(&format!("cells/{}/control.json", encode_hex(cell)))
     }
 
+    /// Returns the advisory desired read-replica count for one Cell.
+    #[must_use]
+    pub fn read_policy_path(&self, cell: &[u8; 32]) -> Path {
+        self.application_path(&format!("cells/{}/read-policy.json", encode_hex(cell)))
+    }
+
+    /// Returns the immutable object path for one Cell incarnation.
     #[must_use]
     pub fn incarnation_object_path(
         &self,
@@ -105,9 +127,9 @@ impl CellStorageLayout {
     ) -> Path {
         self.application_path(&format!(
             "cells/{}/inc/{}/objects/{}.{}",
-            hex(cell),
-            hex(incarnation),
-            hex(digest),
+            encode_hex(cell),
+            encode_hex(incarnation),
+            encode_hex(digest),
             kind.extension()
         ))
     }
@@ -128,52 +150,85 @@ impl CellStorageLayout {
     ) -> Path {
         self.application_path(&format!(
             "cells/{}/inc/{}/objects/.staging/{}.{}",
-            hex(cell),
-            hex(incarnation),
-            hex(digest),
+            encode_hex(cell),
+            encode_hex(incarnation),
+            encode_hex(digest),
             kind.extension()
         ))
     }
 
+    /// Returns the prefix containing all tenant catalog heads.
     #[must_use]
-    pub fn catalog_head_path(&self, shard: u8) -> Path {
-        self.application_path(&format!("catalog/{shard:02x}/head.json"))
+    pub fn catalog_tenants_prefix(&self) -> Path {
+        self.application_path("catalog/tenants")
     }
 
+    /// Returns the catalog head path for one tenant and shard.
+    #[must_use]
+    pub fn catalog_head_path(&self, tenant: &[u8; 16], shard: u8) -> Path {
+        Path::from(format!(
+            "{}/{}/{shard:02x}/head.json",
+            self.catalog_tenants_prefix(),
+            encode_hex(tenant)
+        ))
+    }
+
+    /// Returns the due-hint prefix for one minute bucket.
+    ///
+    /// A hint is an accelerator, never authority: the Cell's own control and
+    /// SQLite state decide what is due, and the full catalog scan remains the
+    /// backstop when a hint is missing.
+    #[must_use]
+    pub fn due_hint_prefix(&self, bucket: u64) -> Path {
+        self.application_path(&format!("due/{bucket:016x}/"))
+    }
+
+    /// Returns the due-hint path for one Cell in one minute bucket.
+    #[must_use]
+    pub fn due_hint_path(&self, bucket: u64, cell: &[u8; 32]) -> Path {
+        self.application_path(&format!("due/{bucket:016x}/{}.json", encode_hex(cell)))
+    }
+
+    /// Returns the catalog page object path for one digest.
     #[must_use]
     pub fn catalog_object_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("catalog/objects/{}.json", hex(digest)))
+        self.application_path(&format!("catalog/objects/{}.json", encode_hex(digest)))
     }
 
+    /// Returns the catalog pin record path for one pin.
     #[must_use]
     pub fn pin_path(&self, pin: &[u8; 16]) -> Path {
-        self.application_path(&format!("pins/{}.json", hex(pin)))
+        self.application_path(&format!("pins/{}.json", encode_hex(pin)))
     }
 
+    /// Returns the catalog pin object path for one digest.
     #[must_use]
     pub fn pin_object_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("pins/objects/{}.json", hex(digest)))
+        self.application_path(&format!("pins/objects/{}.json", encode_hex(digest)))
     }
 
+    /// Returns the release-migration progress path for one Cell operation.
     #[must_use]
     pub fn migration_path(&self, cell: &[u8; 32], operation: &[u8; 16], suffix: &str) -> Path {
         self.application_path(&format!(
             "cells/{}/migration/{}/{}",
-            hex(cell),
-            hex(operation),
+            encode_hex(cell),
+            encode_hex(operation),
             suffix
         ))
     }
 
+    /// Returns the node advertisement path for one session.
     #[must_use]
     pub fn node_path(&self, session: &[u8; 16]) -> Path {
         Path::from(format!(
             "{}/cells/v1/nodes/{}.json",
             self.root,
-            hex(session)
+            encode_hex(session)
         ))
     }
 
+    /// Returns the node directory prefix.
     #[must_use]
     pub fn node_directory_path(&self) -> Path {
         Path::from(format!("{}/cells/v1/nodes", self.root))
@@ -185,8 +240,8 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/node-logs/{}/{epoch}/bundles/{}.bundle",
             self.root,
-            hex(leader),
-            hex(digest)
+            encode_hex(leader),
+            encode_hex(digest)
         ))
     }
 
@@ -196,8 +251,8 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/node-logs/{}/{epoch}/recovery/{}.json",
             self.root,
-            hex(leader),
-            hex(digest)
+            encode_hex(leader),
+            encode_hex(digest)
         ))
     }
 
@@ -205,20 +260,10 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/apps/{}/{}",
             self.root,
-            hex(&self.application),
+            encode_hex(&self.application),
             suffix
         ))
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 #[cfg(test)]

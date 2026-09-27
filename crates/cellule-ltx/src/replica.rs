@@ -15,11 +15,17 @@ use crate::{CaptureBatch, Host, Limits, LtxError, Position, Result};
 
 mod cache;
 mod compaction;
-mod directory;
+pub(crate) mod directory;
+mod merge;
+mod prepare;
+mod read_only;
 mod restore;
-mod root;
+pub(crate) mod root;
+mod upload;
+mod verify;
 
 use directory::{DirectoryEntry, DirectorySpan, DirectoryTree, ObjectExtent};
+pub use read_only::ReadOnlyRoot;
 use root::{
     RootDocument, SegmentDescriptor, decode_root, decode_segment_page, encode_root,
     encode_segment_page,
@@ -45,18 +51,70 @@ pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 /// An immutable Cell root identity suitable for publication in control state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootRef {
+    /// Cell this root belongs to.
     pub cell: [u8; 32],
+    /// Incarnation that produced the root.
     pub incarnation: [u8; 16],
+    /// Digest of the published root record.
     pub digest: [u8; 32],
+    /// Position the root publishes.
     pub position: Position,
+    /// Root commit sequence.
     pub commit_sequence: u64,
 }
 
 /// One immutable object authenticated as part of an exact Cell root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RootObjectRef {
+    /// Digest of the immutable object.
     pub digest: [u8; 32],
+    /// Kind of immutable object.
     pub kind: CellObjectKind,
+}
+
+/// Immutable publication cost a replica path paid.
+///
+/// One prepared root uploads a segment body and index, the changed directory
+/// nodes, and the root document, so a caller that wants the object-store cost
+/// of one command reads this ledger instead of inferring it from the database
+/// size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublicationCost {
+    /// Immutable objects uploaded.
+    pub objects: u64,
+    /// Sum of immutable object bytes uploaded.
+    pub bytes: u64,
+}
+
+#[derive(Default)]
+pub(super) struct PublicationLedger {
+    objects: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl PublicationLedger {
+    pub(super) fn record(&self, bytes: u64) {
+        self.objects
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the accumulated cost and resets the ledger.
+    fn take(&self) -> PublicationCost {
+        PublicationCost {
+            objects: self.objects.swap(0, std::sync::atomic::Ordering::AcqRel),
+            bytes: self.bytes.swap(0, std::sync::atomic::Ordering::AcqRel),
+        }
+    }
+
+    /// Returns the accumulated cost without resetting the ledger.
+    fn snapshot(&self) -> PublicationCost {
+        PublicationCost {
+            objects: self.objects.load(std::sync::atomic::Ordering::Relaxed),
+            bytes: self.bytes.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 /// A fully uploaded immutable root proposal.
@@ -84,6 +142,8 @@ pub struct RecoveryOverlay {
 }
 
 impl RecoveryOverlay {
+    /// Describes the overlay that supersedes `predecessor`; the caller adds
+    /// the disk reservation and bundle lease that keep it readable.
     #[must_use]
     pub fn new(
         predecessor: RootRef,
@@ -125,21 +185,25 @@ impl RecoveryOverlay {
         Ok(self.bundle)
     }
 
+    /// Returns the root this overlay supersedes.
     #[must_use]
     pub const fn predecessor(&self) -> RootRef {
         self.predecessor
     }
 
+    /// Returns the position the overlay publishes.
     #[must_use]
     pub const fn final_position(&self) -> Position {
         self.final_position
     }
 
+    /// Returns the commit sequence the overlay publishes.
     #[must_use]
     pub const fn final_commit_sequence(&self) -> u64 {
         self.final_commit_sequence
     }
 
+    /// Returns the verified recovery bundle.
     #[must_use]
     pub fn bundle(&self) -> &crate::bundle::Bundle {
         &self.bundle
@@ -147,16 +211,19 @@ impl RecoveryOverlay {
 }
 
 impl PreparedRoot {
+    /// Returns the exact root that was prepared.
     #[must_use]
     pub fn root(&self) -> RootRef {
         self.verified.root
     }
 
+    /// Returns the root this preparation supersedes, if any.
     #[must_use]
     pub fn predecessor(&self) -> Option<RootRef> {
         self.predecessor
     }
 
+    /// Returns the verified metadata for the prepared root.
     #[must_use]
     pub fn verified(&self) -> &VerifiedRoot {
         &self.verified
@@ -176,31 +243,37 @@ pub struct VerifiedRoot {
 }
 
 impl VerifiedRoot {
+    /// Returns the exact immutable root.
     #[must_use]
     pub fn root(&self) -> RootRef {
         self.root
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn database_pages(&self) -> u32 {
         self.database_pages
     }
 
+    /// Returns the schema version.
     #[must_use]
     pub fn schema(&self) -> u32 {
         self.schema
     }
 
+    /// Returns the number of segments the root references.
     #[must_use]
     pub fn segment_count(&self) -> usize {
         self.segment_count
     }
 
+    /// Returns the height of the root's directory tree.
     #[must_use]
     pub fn directory_height(&self) -> u32 {
         self.directory_height
@@ -222,6 +295,15 @@ impl VerifiedRoot {
             .host
             .observe_ltx_logical_read(crate::LtxReadOrigin::Cold);
         restore::run(&self.pages, destination).await
+    }
+
+    /// Opens this exact root as an authenticated, sparse read-only SQLite view.
+    ///
+    /// The destination and its sidecars must not exist. The view removes its
+    /// empty placeholder when the last owner drops; page bodies use a bounded cache.
+    /// Call on a SQLite worker: opening can block on authenticated page faults.
+    pub fn open_read_only(&self, destination: &Path) -> Result<ReadOnlyRoot> {
+        ReadOnlyRoot::open(self, destination)
     }
 }
 
@@ -283,16 +365,27 @@ pub struct CellWritableDatabase {
 }
 
 impl CellPagedDatabase {
+    pub(crate) fn host(&self) -> Host {
+        self.replica.host.clone()
+    }
+
+    pub(crate) fn limits(&self) -> Limits {
+        self.replica.limits
+    }
+
+    /// Returns the position this root publishes.
     #[must_use]
     pub fn position(&self) -> Position {
         self.position
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn page_count(&self) -> u32 {
         self.database_pages
@@ -302,6 +395,8 @@ impl CellPagedDatabase {
     ///
     /// The destination must be fresh and must later be passed unchanged to
     /// `CellWritableDatabase::open_writable`.
+    /// Requires a running Tokio runtime, which must remain alive while canceled
+    /// activation work releases its file and host admission.
     pub async fn prepare_writable(
         mut self,
         destination: &std::path::Path,
@@ -419,7 +514,7 @@ impl CellPagedDatabase {
         Ok(bytes)
     }
 
-    async fn read_run(
+    pub(crate) async fn read_run(
         &self,
         first: u32,
         max_pages: u32,
@@ -550,16 +645,19 @@ impl CellWritableDatabase {
         self.checksums.clone()
     }
 
+    /// Returns the position this activation reads.
     #[must_use]
     pub fn position(&self) -> Position {
         self.database.position()
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.database.page_size()
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn page_count(&self) -> u32 {
         self.database.page_count()
@@ -596,6 +694,7 @@ pub struct CellReplica {
     incarnation: [u8; 16],
     limits: Limits,
     host: Host,
+    cost: Arc<PublicationLedger>,
 }
 
 impl CellReplica {
@@ -615,6 +714,7 @@ impl CellReplica {
             incarnation,
             limits: limits.validate()?,
             host: Host::default(),
+            cost: Arc::new(PublicationLedger::default()),
         })
     }
 
@@ -622,6 +722,27 @@ impl CellReplica {
     #[must_use]
     pub const fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// Returns the cumulative immutable publication cost this replica paid.
+    ///
+    /// The ledger covers every object the replica uploaded: segment bodies and
+    /// indexes, directory nodes, root documents, segment pages, bundle bodies,
+    /// and compaction outputs. Callers sampling per-command cost use
+    /// [`Self::take_publication_cost`] instead.
+    #[must_use]
+    pub fn publication_cost(&self) -> PublicationCost {
+        self.cost.snapshot()
+    }
+
+    /// Returns the publication cost accumulated since the last call and resets it.
+    ///
+    /// One Cell has a single publisher at a time, so the reset is safe there;
+    /// a caller that runs concurrent prepares must use
+    /// [`Self::publication_cost`] deltas instead.
+    #[must_use]
+    pub fn take_publication_cost(&self) -> PublicationCost {
+        self.cost.take()
     }
 
     /// Selects the caller's bounded I/O and blocking execution facilities.
@@ -644,1097 +765,27 @@ impl CellReplica {
         crate::Db::open_with_host(destination, self.limits, self.host.clone())
     }
 
-    /// Verifies and uploads a new immutable root without changing authority.
-    pub async fn prepare(
-        &self,
-        base: Option<&RootRef>,
-        cuts: &CaptureBatch,
-        commit_sequence: u64,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_dirty().await?;
-        replica
-            .prepare_captured(base, cuts, commit_sequence, schema)
-            .await
-    }
-
-    async fn prepare_captured(
-        &self,
-        base: Option<&RootRef>,
-        cuts: &CaptureBatch,
-        commit_sequence: u64,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        self.validate_metadata(commit_sequence, schema)?;
-        if cuts.segments.is_empty() {
-            return Err(LtxError::InvalidState("empty Cell append"));
-        }
-        let captured_bytes = cuts.segments.iter().try_fold(0_u64, |total, segment| {
-            if segment.info().size_bytes > self.limits.max_capture_bytes {
-                return Err(LtxError::Limit("captured Cell LTX bytes"));
-            }
-            total
-                .checked_add(segment.info().size_bytes)
-                .ok_or(LtxError::Limit("captured Cell LTX bytes"))
-        })?;
-        if captured_bytes > self.limits.max_capture_bytes {
-            return Err(LtxError::Limit("captured Cell LTX bytes"));
-        }
-        let load_base = async {
-            match base {
-                Some(root) => self.load_graph(root).await.map(Some),
-                None => Ok(None),
-            }
-        };
-        // Local captures and the immutable predecessor cannot affect each
-        // other; chain validation still waits for both exact inputs.
-        let (base_graph, inputs) =
-            futures_util::future::try_join(load_base, self.prepare_captured_inputs(&cuts.segments))
-                .await?;
-        self.validate_append_sequence(&base_graph, commit_sequence)?;
-
-        // Admit the complete prospective chain from trusted capture metadata
-        // before reading local bodies or starting immutable uploads.
-        let mut descriptors = base_graph
-            .as_ref()
-            .map(|graph| graph.descriptors.clone())
-            .unwrap_or_default();
-        descriptors.extend(
-            cuts.segments
-                .iter()
-                .map(|segment| SegmentDescriptor::native(segment.info().clone(), [0; 32], 0)),
-        );
-        self.validate_chain(&descriptors, cuts.position)?;
-
-        // Keep each exact capture handle open through verification and upload.
-        // A path replacement cannot redirect retries, while the inspected LTX
-        // digest still rejects in-place mutation before authority may publish.
-        self.prepare_append(
-            base,
-            base_graph,
-            inputs,
-            cuts.position,
-            commit_sequence,
-            schema,
-            None,
-        )
-        .await
-    }
-
-    async fn prepare_captured_inputs(
-        &self,
-        segments: &[crate::LocalSegment],
-    ) -> Result<Vec<AppendInput>> {
-        stream::iter(segments.iter().cloned().map(|segment| async move {
-            let source = segment.path().to_owned();
-            let info = segment.info().clone();
-            let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
-            let index = match segment.captured_index() {
-                Some(index) => index,
-                None => {
-                    Bytes::from(inspect_segment_source(self, Arc::clone(&source), &info).await?)
-                }
-            };
-            Ok(AppendInput {
-                info,
-                location: BodyLocation::Native,
-                index,
-                body: AppendBody::Native(source),
-            })
-        }))
-        // Preserve descriptor order while overlapping independent file jobs.
-        // Host job permits remain the shared process-wide admission boundary.
-        .buffered(SEGMENT_TRANSFER_CONCURRENCY)
-        .try_collect()
-        .await
-    }
-
-    /// Verifies selected Cell rows from a shared bundle and prepares one root append.
+    /// Moves a resumable database onto a fresh path and continues its capture.
     ///
-    /// Bundle row identity is routing metadata, not authorization. Only rows using
-    /// the canonical Cell/incarnation identity are selected, and their complete LTX
-    /// chain is independently verified before the immutable bundle is retained.
-    pub async fn prepare_bundle(
+    /// The caller owns the proof that the record it read still matches the
+    /// authoritative control: this path reads no origin object, so a foreign or
+    /// stale file would otherwise be served as though it held this replica's
+    /// root. A database that is not cleanly checkpointed is refused, and the
+    /// caller must fall back to restoring the exact root.
+    pub fn open_resumed(
         &self,
-        base: Option<&RootRef>,
-        bundle: &crate::bundle::Bundle,
-        commit_sequence: u64,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_dirty().await?;
-        replica
-            .prepare_bundle_admitted(base, bundle, commit_sequence, schema)
-            .await
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<crate::Db> {
+        let host = self.host.clone().without_dirty();
+        crate::resume::move_resumed(source, destination, &host)?;
+        crate::Db::open_resumed_with_host(destination, self.limits, host)
     }
 
-    /// Prepares the exact successor pinned by a recovered node-log overlay.
-    ///
-    /// Recovery policy and ownership remain caller-owned. This method accepts
-    /// only this replica's Cell/incarnation rows, requires the declared final
-    /// position to match the bundle, and reuses normal root preparation.
-    pub async fn prepare_recovered_overlay(
-        &self,
-        overlay: &RecoveryOverlay,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        if overlay.predecessor.cell != self.cell
-            || overlay.predecessor.incarnation != self.incarnation
-            || overlay.final_commit_sequence <= overlay.predecessor.commit_sequence
-        {
-            return Err(LtxError::InvalidState("recovery overlay scope"));
-        }
-        let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
-        let final_position = overlay
-            .bundle
-            .rows()
-            .iter()
-            .rfind(|row| row.repository == repository && row.epoch == epoch)
-            .map(|row| row.info.position())
-            .ok_or(LtxError::TxNotAvailable)?;
-        if final_position != overlay.final_position {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        let prepared = self
-            .prepare_bundle(
-                Some(&overlay.predecessor),
-                &overlay.bundle,
-                overlay.final_commit_sequence,
-                schema,
-            )
-            .await?;
-        if prepared.root().position != overlay.final_position {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        Ok(prepared)
-    }
-
-    async fn prepare_bundle_admitted(
-        &self,
-        base: Option<&RootRef>,
-        bundle: &crate::bundle::Bundle,
-        commit_sequence: u64,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        self.validate_metadata(commit_sequence, schema)?;
-        if bundle.len() > self.limits.max_plan_bytes {
-            return Err(LtxError::Limit("Cell bundle bytes"));
-        }
-        let base_graph = match base {
-            Some(root) => Some(self.load_graph(root).await?),
-            None => None,
-        };
-        self.validate_append_sequence(&base_graph, commit_sequence)?;
-
-        let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
-        let bundle_digest = bundle.digest();
-        let mut inputs = Vec::new();
-        let mut selected_bytes = 0_u64;
-        let mut prospective = base_graph
-            .as_ref()
-            .map(|graph| graph.descriptors.clone())
-            .unwrap_or_default();
-        for (index, row) in bundle.rows().iter().enumerate() {
-            if row.repository != repository || row.epoch != epoch {
-                continue;
-            }
-            selected_bytes = selected_bytes
-                .checked_add(row.info.size_bytes)
-                .ok_or(LtxError::Limit("captured Cell bundle bytes"))?;
-            if selected_bytes > self.limits.max_capture_bytes {
-                return Err(LtxError::Limit("captured Cell bundle bytes"));
-            }
-            prospective.push(SegmentDescriptor::bundled(
-                row.info.clone(),
-                [0; 32],
-                0,
-                bundle_digest,
-                row.offset,
-            ));
-            let bytes = bundle.read_segment(index)?;
-            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(&bytes)?;
-            if size != row.info.size_bytes
-                || digest != row.info.blake3
-                || crate::SegmentInfo::from_inspected(&file, size, digest) != row.info
-            {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            let index_bytes = Bytes::from(crate::paged::encode_index_from_pages(&pages)?);
-            inputs.push(AppendInput {
-                info: row.info.clone(),
-                location: BodyLocation::Bundle {
-                    digest: bundle_digest,
-                    offset: row.offset,
-                },
-                index: index_bytes,
-                body: AppendBody::Bundle,
-            });
-        }
-        let target = inputs
-            .last()
-            .map(|input| input.info.position())
-            .ok_or(LtxError::TxNotAvailable)?;
-        self.validate_chain(&prospective, target)?;
-        self.prepare_append(
-            base,
-            base_graph,
-            inputs,
-            target,
-            commit_sequence,
-            schema,
-            Some(bundle),
-        )
-        .await
-    }
-
-    /// Prepares an exact representation-only compaction of a pinned root.
-    ///
-    /// The output retains the base TXID, checksum, commit sequence and schema.
-    /// Only the authority owner may later publish the proposal as a normal root CAS.
-    /// `scratch_directory` must already exist, be private to the caller and have
-    /// space for selected bodies and indexes plus compacted LTX/index outputs.
-    /// Owned scratch files are removed after success or failure.
-    pub async fn prepare_compaction(
-        &self,
-        base: &RootRef,
-        range: std::ops::Range<usize>,
-        level: u8,
-        scratch_directory: &Path,
-    ) -> Result<PreparedRoot> {
-        let started = self.host.now_monotonic();
-        let result = async {
-            let mut replica = self.clone();
-            replica.host = self.host.for_recovery().await?;
-            let graph = replica.load_graph(base).await?;
-            let scratch_bytes = compaction_scratch_bytes(&graph, range.clone())?;
-            replica.host = replica.host.for_scratch(scratch_bytes).await?;
-            compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
-        }
-        .await;
-        self.host
-            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
-        result
-    }
-
-    /// Prepares one bounded level promotion, or an emergency full compaction.
-    ///
-    /// Normal promotions require eight contiguous inputs from the preceding
-    /// level. A root near its segment or byte ceiling is compacted completely so
-    /// the next append cannot strand an otherwise healthy writer at admission.
-    pub async fn prepare_scheduled_compaction(
-        &self,
-        base: &RootRef,
-        scratch_directory: &Path,
-    ) -> Result<Option<PreparedRoot>> {
-        let started = self.host.now_monotonic();
-        let result = self
-            .prepare_scheduled_compaction_inner(base, scratch_directory)
-            .await;
-        self.host
-            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
-        result
-    }
-
-    async fn prepare_scheduled_compaction_inner(
-        &self,
-        base: &RootRef,
-        scratch_directory: &Path,
-    ) -> Result<Option<PreparedRoot>> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_recovery().await?;
-        let graph = replica.load_graph(base).await?;
-        let segment_limit = MAX_SEGMENTS.min(replica.limits.max_segments);
-        let stored_bytes = graph
-            .descriptors
-            .iter()
-            .try_fold(0_u64, |total, descriptor| {
-                total
-                    .checked_add(descriptor.info.size_bytes)
-                    .and_then(|value| value.checked_add(descriptor.index_length))
-                    .ok_or(LtxError::Limit("Cell root bytes"))
-            })?;
-        let byte_pressure = stored_bytes >= replica.limits.max_plan_bytes.saturating_mul(3) / 4;
-        let selected = if graph.descriptors.len() > 1
-            && (graph.descriptors.len() >= segment_limit.saturating_sub(1).max(1) || byte_pressure)
-        {
-            let end = graph.descriptors.len();
-            Some((0..end, 9))
-        } else {
-            let mut selected = None;
-            for level in 1..=8 {
-                if let Some(range) = scheduled_compaction_range(
-                    &graph.descriptors,
-                    level,
-                    replica.limits.max_file_bytes,
-                ) {
-                    selected = Some((range, level));
-                    break;
-                }
-            }
-            selected
-        };
-        let Some((range, level)) = selected else {
-            return Ok(None);
-        };
-        let scratch_bytes = compaction_scratch_bytes(&graph, range.clone())?;
-        replica.host = replica.host.for_scratch(scratch_bytes).await?;
-        compaction::prepare(&replica, base, graph, range, level, scratch_directory)
-            .await
-            .map(Some)
-    }
-
-    async fn prepare_append(
-        &self,
-        base: Option<&RootRef>,
-        base_graph: Option<LoadedGraph>,
-        inputs: Vec<AppendInput>,
-        target: Position,
-        commit_sequence: u64,
-        schema: u32,
-        bundle: Option<&crate::bundle::Bundle>,
-    ) -> Result<PreparedRoot> {
-        let prepared = inputs
-            .into_iter()
-            .map(|input| {
-                let digest = *blake3::hash(&input.index).as_bytes();
-                let descriptor = match input.location {
-                    BodyLocation::Native => {
-                        SegmentDescriptor::native(input.info, digest, input.index.len() as u64)
-                    }
-                    BodyLocation::Bundle { digest, offset } => SegmentDescriptor::bundled(
-                        input.info,
-                        *blake3::hash(&input.index).as_bytes(),
-                        input.index.len() as u64,
-                        digest,
-                        offset,
-                    ),
-                };
-                Ok(PreparedSegment {
-                    descriptor,
-                    index: input.index,
-                    body: input.body,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut descriptors = base_graph
-            .as_ref()
-            .map(|graph| graph.descriptors.clone())
-            .unwrap_or_default();
-        descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
-        self.validate_chain(&descriptors, target)?;
-        let directory_inputs = prepared
-            .iter()
-            .map(|segment| DirectoryInput {
-                descriptor: segment.descriptor.clone(),
-                index: segment.index.clone(),
-            })
-            .collect::<Vec<_>>();
-        let dependency_uploads = async {
-            if let Some(bundle) = bundle {
-                self.put_bundle(bundle).await?;
-            }
-            stream::iter(
-                prepared
-                    .into_iter()
-                    .map(|segment| self.upload_prepared_segment(segment)),
-            )
-            .buffered(SEGMENT_TRANSFER_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?;
-            Ok::<(), LtxError>(())
-        };
-        let root_preparation = self.finish_preparation(
-            base,
-            base_graph,
-            descriptors,
-            &directory_inputs,
-            target,
-            commit_sequence,
-            schema,
-        );
-        // Content-addressed dependencies and root metadata can upload in
-        // parallel. The private proposal is returned only after both branches
-        // finish, so a failed branch can leave only unreachable objects.
-        let (_, prepared) =
-            futures_util::future::try_join(dependency_uploads, root_preparation).await?;
-        Ok(prepared)
-    }
-
-    async fn finish_preparation(
-        &self,
-        base: Option<&RootRef>,
-        base_graph: Option<LoadedGraph>,
-        descriptors: Vec<SegmentDescriptor>,
-        directory_inputs: &[DirectoryInput],
-        target: Position,
-        commit_sequence: u64,
-        schema: u32,
-    ) -> Result<PreparedRoot> {
-        for descriptor in &descriptors {
-            descriptor.validate_published(self.limits)?;
-        }
-        let endpoint = descriptors.last().ok_or(LtxError::LTXCorrupted)?;
-        let page_size = endpoint.info.page_size;
-        let database_pages = endpoint.info.database_pages;
-        let extents = object_extents(&descriptors)?;
-        let directory = if let Some(graph) = &base_graph {
-            let (changes, retain_through) =
-                directory_changes(directory_inputs, graph.document.database_pages)?;
-            let base_extents = object_extents(&graph.descriptors)?;
-            DirectoryTree::update(
-                directory::Verification {
-                    layout: &self.layout,
-                    cell: &self.cell,
-                    incarnation: &self.incarnation,
-                    page_size: graph.document.page_size,
-                    database_pages: graph.document.database_pages,
-                    extents: &base_extents,
-                    host: &self.host,
-                    origin: crate::LtxReadOrigin::Cold,
-                },
-                graph.document.directory_digest,
-                graph.document.directory_height,
-                graph.aggregate,
-                changes,
-                retain_through,
-                directory::Verification {
-                    layout: &self.layout,
-                    cell: &self.cell,
-                    incarnation: &self.incarnation,
-                    page_size,
-                    database_pages,
-                    extents: &extents,
-                    host: &self.host,
-                    origin: crate::LtxReadOrigin::Cold,
-                },
-                target.checksum,
-            )
-            .await?
-        } else {
-            let entries = directory::initial_entries(directory_inputs)?;
-            let directory =
-                directory::build_initial_and_upload(entries, page_size, database_pages, self)
-                    .await?;
-            if directory.checksum() != target.checksum {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            directory
-        };
-        let directory_uploads = self.put_objects(
-            CellObjectKind::Directory,
-            directory
-                .objects()
-                .iter()
-                .map(|node| (node.digest, node.bytes.clone()))
-                .collect(),
-        );
-        let root_uploads = self.finish_root(
-            base,
-            descriptors,
-            target,
-            commit_sequence,
-            schema,
-            page_size,
-            database_pages,
-            directory,
-        );
-        // Both object sets are immutable; no proposal escapes unless every
-        // upload succeeds, and a failed sibling leaves only unreachable data.
-        let (_, prepared) = futures_util::future::try_join(directory_uploads, root_uploads).await?;
-        Ok(prepared)
-    }
-
-    #[expect(clippy::too_many_arguments)]
-    async fn finish_root(
-        &self,
-        base: Option<&RootRef>,
-        descriptors: Vec<SegmentDescriptor>,
-        target: Position,
-        commit_sequence: u64,
-        schema: u32,
-        page_size: u32,
-        database_pages: u32,
-        directory: DirectoryTree,
-    ) -> Result<PreparedRoot> {
-        if directory.checksum() != target.checksum {
-            return Err(LtxError::ChecksumMismatch);
-        }
-
-        let mut segment_pages = Vec::new();
-        let mut root_objects = Vec::new();
-        for page in descriptors.chunks(SEGMENTS_PER_PAGE) {
-            let bytes = encode_segment_page(page)?;
-            let digest = *blake3::hash(&bytes).as_bytes();
-            root_objects.push((digest, bytes));
-            segment_pages.push(digest);
-        }
-        if segment_pages.len() > MAX_SEGMENT_PAGES {
-            return Err(LtxError::Limit("Cell root segment pages"));
-        }
-        let document = RootDocument {
-            cell: self.cell,
-            checksum: target.checksum,
-            commit_sequence,
-            database_pages,
-            directory_digest: directory.root_digest(),
-            directory_height: directory.height(),
-            incarnation: self.incarnation,
-            page_size,
-            schema,
-            segment_pages,
-            txid: target.txid,
-        };
-        let bytes = encode_root(&document)?;
-        let digest = *blake3::hash(&bytes).as_bytes();
-        root_objects.push((digest, bytes));
-        // The document and its immutable segment pages can be uploaded in
-        // parallel. The root digest remains private until all uploads finish.
-        self.put_objects(CellObjectKind::Root, root_objects).await?;
-        let root = RootRef {
-            cell: self.cell,
-            incarnation: self.incarnation,
-            digest,
-            position: target,
-            commit_sequence,
-        };
-        let host = self
-            .host
-            .clone()
-            .without_recovery()
-            .without_dirty()
-            .without_scratch();
-        Ok(PreparedRoot {
-            predecessor: base.copied(),
-            verified: VerifiedRoot::from_graph(
-                self.clone().with_host(host),
-                root,
-                &document,
-                descriptors,
-            )?,
-        })
-    }
-
-    fn validate_metadata(&self, commit_sequence: u64, schema: u32) -> Result<()> {
-        if schema == 0 || commit_sequence > i64::MAX as u64 {
-            return Err(LtxError::InvalidState("invalid Cell root metadata"));
-        }
-        Ok(())
-    }
-
-    fn validate_append_sequence(
-        &self,
-        base: &Option<LoadedGraph>,
-        commit_sequence: u64,
-    ) -> Result<()> {
-        if base
-            .as_ref()
-            .is_some_and(|graph| commit_sequence <= graph.document.commit_sequence)
-        {
-            return Err(LtxError::InvalidState("commit sequence did not advance"));
-        }
-        Ok(())
-    }
-
-    /// Reopens and verifies an exact immutable root and its metadata graph.
-    ///
-    /// A same-store authenticated metadata cache may avoid body reads, while
-    /// origin HEADs check cached metadata presence. Use
-    /// [`Self::reachable_objects`] to authenticate current remote bytes and
-    /// inventory every dependency.
-    pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot> {
-        let graph = self.load_graph(root).await?;
-        VerifiedRoot::from_graph(self.clone(), *root, &graph.document, graph.descriptors)
-    }
-
-    /// Verifies and returns the complete immutable dependency set for an exact root.
-    ///
-    /// Callers may use this bounded inventory for backup pinning and reachability
-    /// collection. A missing or corrupt dependency fails the traversal closed.
-    pub async fn reachable_objects(&self, root: &RootRef) -> Result<Vec<RootObjectRef>> {
-        // Inventory must prove origin presence even for metadata uploaded here.
-        let graph = self.load_graph_with_cache(root, false).await?;
-        let extents = object_extents(&graph.descriptors)?;
-        let verification = directory::Verification {
-            layout: &self.layout,
-            cell: &self.cell,
-            incarnation: &self.incarnation,
-            page_size: graph.document.page_size,
-            database_pages: graph.document.database_pages,
-            extents: &extents,
-            host: &self.host,
-            origin: crate::LtxReadOrigin::Cold,
-        };
-        let directory = directory::reachable_digests(
-            verification,
-            graph.document.directory_digest,
-            graph.document.directory_height,
-            graph.aggregate,
-        )
-        .await?;
-
-        let mut objects = std::collections::BTreeSet::new();
-        let mut streamed = std::collections::BTreeMap::new();
-        objects.insert(RootObjectRef {
-            digest: root.digest,
-            kind: CellObjectKind::Root,
-        });
-        objects.extend(
-            graph
-                .document
-                .segment_pages
-                .iter()
-                .map(|digest| RootObjectRef {
-                    digest: *digest,
-                    kind: CellObjectKind::Root,
-                }),
-        );
-        for descriptor in &graph.descriptors {
-            let body = RootObjectRef {
-                digest: descriptor.object_digest(),
-                kind: descriptor.object_kind(),
-            };
-            let body_limit = match body.kind {
-                CellObjectKind::Bundle => self.limits.max_plan_bytes,
-                CellObjectKind::Ltx => self.limits.max_file_bytes,
-                _ => return Err(LtxError::LTXCorrupted),
-            };
-            let body_length =
-                (body.kind == CellObjectKind::Ltx).then_some(descriptor.info.size_bytes);
-            if streamed
-                .insert(body, (body_limit, body_length))
-                .is_some_and(|previous| previous != (body_limit, body_length))
-            {
-                return Err(LtxError::LTXCorrupted);
-            }
-            let index = RootObjectRef {
-                digest: descriptor.index_digest,
-                kind: CellObjectKind::Index,
-            };
-            if streamed
-                .insert(
-                    index,
-                    (self.limits.max_plan_bytes, Some(descriptor.index_length)),
-                )
-                .is_some_and(|(_, length)| length != Some(descriptor.index_length))
-            {
-                return Err(LtxError::LTXCorrupted);
-            }
-        }
-        for (object, (limit, length)) in &streamed {
-            self.verify_remote_object(*object, *limit, *length).await?;
-        }
-        objects.extend(streamed.into_keys());
-        objects.extend(directory.into_iter().map(|digest| RootObjectRef {
-            digest,
-            kind: CellObjectKind::Directory,
-        }));
-        Ok(objects.into_iter().collect())
-    }
-
-    async fn verify_remote_object(
-        &self,
-        object: RootObjectRef,
-        max_bytes: u64,
-        expected_bytes: Option<u64>,
-    ) -> Result<()> {
-        let path = self.layout.incarnation_object_path(
-            &self.cell,
-            &self.incarnation,
-            &object.digest,
-            object.kind,
-        );
-        let _permit = self.host.io_permit().await?;
-        let request = self.layout.store().get_stream(&path, None).await;
-        if request.is_err() {
-            self.host
-                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, false, 0);
-        }
-        let (metadata, _, mut stream) = request?;
-        if metadata.size > max_bytes || expected_bytes.is_some_and(|size| size != metadata.size) {
-            self.host
-                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, true, 0);
-            return Err(LtxError::LTXCorrupted);
-        }
-        let mut digest = blake3::Hasher::new();
-        let mut read_bytes = 0usize;
-        loop {
-            match stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    digest.update(&chunk);
-                    read_bytes = read_bytes.saturating_add(chunk.len());
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    self.host.observe_ltx_origin_request(
-                        crate::LtxReadOrigin::Cold,
-                        false,
-                        read_bytes,
-                    );
-                    return Err(error.into());
-                }
-            }
-        }
-        self.host
-            .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, true, read_bytes);
-        if digest.finalize().as_bytes() != &object.digest {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        Ok(())
-    }
-
-    async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {
-        self.load_graph_with_cache(root, true).await
-    }
-
-    async fn load_graph_with_cache(&self, root: &RootRef, use_cache: bool) -> Result<LoadedGraph> {
-        let started = self.host.now_monotonic();
-        let result = self.load_graph_inner(root, use_cache).await;
-        self.host
-            .observe_ltx_phase(crate::LtxPhase::RootOpen, started, result.is_ok());
-        result
-    }
-
-    async fn load_graph_inner(&self, root: &RootRef, use_cache: bool) -> Result<LoadedGraph> {
-        self.check_scope(root)?;
-        let (bytes, cached_root) = self
-            .read_object(&root.digest, CellObjectKind::Root, ROOT_BYTES, use_cache)
-            .await?;
-        if *blake3::hash(&bytes).as_bytes() != root.digest {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        let document = decode_root(&bytes)?;
-        if document.cell != self.cell
-            || document.incarnation != self.incarnation
-            || document.txid != root.position.txid
-            || document.checksum != root.position.checksum
-            || document.commit_sequence != root.commit_sequence
-        {
-            return Err(LtxError::InvalidState("Cell root reference mismatch"));
-        }
-        if document.segment_pages.is_empty() || document.segment_pages.len() > MAX_SEGMENT_PAGES {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let pages = stream::iter(
-            document
-                .segment_pages
-                .iter()
-                .copied()
-                .map(|digest| async move {
-                    let (bytes, cached) = self
-                        .read_object(&digest, CellObjectKind::Root, SEGMENT_PAGE_BYTES, use_cache)
-                        .await?;
-                    if *blake3::hash(&bytes).as_bytes() != digest {
-                        return Err(LtxError::ChecksumMismatch);
-                    }
-                    let page = decode_segment_page(&bytes)?;
-                    if page.is_empty() || page.len() > SEGMENTS_PER_PAGE {
-                        return Err(LtxError::LTXCorrupted);
-                    }
-                    Ok((page, cached.then_some((digest, bytes.len()))))
-                }),
-        )
-        .buffered(OBJECT_FETCH_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-        let mut cached_metadata = Vec::new();
-        if cached_root {
-            cached_metadata.push((root.digest, bytes.len()));
-        }
-        let mut descriptors = Vec::new();
-        for (page, cached) in pages {
-            descriptors.extend(page);
-            cached_metadata.extend(cached);
-        }
-        // A cached predecessor cannot justify a new root if its metadata has
-        // disappeared from origin. Check all cached objects in one bounded wave.
-        self.verify_cached_metadata(&cached_metadata).await?;
-        self.validate_chain(&descriptors, root.position)?;
-        for descriptor in &descriptors {
-            descriptor.validate_published(self.limits)?;
-        }
-        let endpoint = descriptors.last().ok_or(LtxError::LTXCorrupted)?;
-        if document.page_size != endpoint.info.page_size
-            || document.database_pages != endpoint.info.database_pages
-            || document.schema == 0
-        {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let extents = object_extents(&descriptors)?;
-        let directory_started = self.host.now_monotonic();
-        let aggregate = directory::verify_root(
-            directory::Verification {
-                layout: &self.layout,
-                cell: &self.cell,
-                incarnation: &self.incarnation,
-                page_size: document.page_size,
-                database_pages: document.database_pages,
-                extents: &extents,
-                host: &self.host,
-                origin: crate::LtxReadOrigin::Cold,
-            },
-            document.directory_digest,
-            document.directory_height,
-        )
-        .await;
-        self.host.observe_ltx_phase(
-            crate::LtxPhase::Directory,
-            directory_started,
-            aggregate.is_ok(),
-        );
-        let aggregate = aggregate?;
-        if aggregate.checksum != document.checksum {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        Ok(LoadedGraph {
-            aggregate,
-            document,
-            descriptors,
-        })
-    }
-
-    fn validate_chain(&self, descriptors: &[SegmentDescriptor], target: Position) -> Result<()> {
-        if descriptors.is_empty() || descriptors.len() > MAX_SEGMENTS.min(self.limits.max_segments)
-        {
-            return Err(LtxError::Limit("Cell root segments"));
-        }
-        let mut previous = Position::default();
-        let mut page_size = None;
-        let mut total = 0u64;
-        for descriptor in descriptors {
-            descriptor.validate(self.limits)?;
-            let info = &descriptor.info;
-            total = total
-                .checked_add(info.size_bytes)
-                .and_then(|value| value.checked_add(descriptor.index_length))
-                .ok_or(LtxError::Limit("Cell root bytes"))?;
-            if total > self.limits.max_plan_bytes
-                || previous.txid.checked_add(1) != Some(info.min_txid)
-                || info.pre_checksum != previous.checksum
-                || page_size.is_some_and(|value| value != info.page_size)
-            {
-                return Err(LtxError::LTXCorrupted);
-            }
-            previous = info.position();
-            page_size = Some(info.page_size);
-        }
-        if previous != target {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        Ok(())
-    }
-
-    fn check_scope(&self, root: &RootRef) -> Result<()> {
-        if root.cell != self.cell || root.incarnation != self.incarnation {
-            return Err(LtxError::InvalidState(
-                "root belongs to another Cell incarnation",
-            ));
-        }
-        Ok(())
-    }
-
-    async fn put_object(
-        &self,
-        digest: &[u8; 32],
-        kind: CellObjectKind,
-        bytes: Vec<u8>,
-    ) -> Result<()> {
-        self.put_object_bytes(digest, kind, Bytes::from(bytes))
-            .await
-    }
-
-    async fn put_object_bytes(
-        &self,
-        digest: &[u8; 32],
-        kind: CellObjectKind,
-        bytes: Bytes,
-    ) -> Result<()> {
-        if *blake3::hash(&bytes).as_bytes() != *digest {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        let _permit = self.host.io_permit().await?;
-        let path = self
-            .layout
-            .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
-        self.layout.store().put(&path, bytes.clone()).await?;
-        if matches!(kind, CellObjectKind::Root | CellObjectKind::Directory) {
-            cache::insert(
-                &self.layout,
-                &self.cell,
-                &self.incarnation,
-                *digest,
-                kind,
-                bytes.to_vec().into(),
-            )?;
-        }
-        Ok(())
-    }
-
-    async fn put_objects(
-        &self,
-        kind: CellObjectKind,
-        objects: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<()> {
-        stream::iter(
-            objects
-                .into_iter()
-                .map(|(digest, bytes)| async move { self.put_object(&digest, kind, bytes).await }),
-        )
-        .buffer_unordered(OBJECT_UPLOAD_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-        Ok(())
-    }
-
-    async fn upload_prepared_segment(&self, segment: PreparedSegment) -> Result<()> {
-        let PreparedSegment {
-            descriptor,
-            index,
-            body,
-        } = segment;
-        let body_upload = async {
-            if descriptor.object_kind() != CellObjectKind::Ltx {
-                return Ok(());
-            }
-            let AppendBody::Native(source) = body else {
-                return Err(LtxError::InvalidState("native Cell body source missing"));
-            };
-            compaction::upload_source(
-                self,
-                source,
-                descriptor.info.size_bytes,
-                &descriptor.info.blake3,
-                CellObjectKind::Ltx,
-            )
-            .await
-        };
-        let index_upload =
-            self.put_object_bytes(&descriptor.index_digest, CellObjectKind::Index, index);
-        futures_util::future::try_join(body_upload, index_upload).await?;
-        Ok(())
-    }
-
-    async fn put_bundle(&self, bundle: &crate::bundle::Bundle) -> Result<()> {
-        let digest = bundle.digest();
-        if bundle.len() > self.limits.max_plan_bytes {
-            return Err(LtxError::Limit("Cell bundle bytes"));
-        }
-        let path = self.layout.incarnation_object_path(
-            &self.cell,
-            &self.incarnation,
-            &digest,
-            CellObjectKind::Bundle,
-        );
-        let staged = self.layout.incarnation_staging_path(
-            &self.cell,
-            &self.incarnation,
-            &digest,
-            CellObjectKind::Bundle,
-        );
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let _permit = self.host.io_permit().await?;
-        let upload = self
-            .layout
-            .store()
-            .put_multipart_source_retry(
-                &staged,
-                bundle.upload_source(),
-                bundle.len(),
-                digest,
-                MULTIPART_BYTES,
-                &cancel,
-                None,
-            )
-            .await;
-        if let Err(error) = upload {
-            return match cleanup_staged(self.layout.store(), &staged).await {
-                Ok(()) => Err(error.into()),
-                Err(cleanup_error) => Err(cleanup_error),
-            };
-        }
-        let promotion = self
-            .layout
-            .store()
-            .promote_staged_content_addressed_object(&staged, &path, digest, bundle.len())
-            .await;
-        match cleanup_staged(self.layout.store(), &staged).await {
-            Err(error) => Err(error),
-            Ok(()) => promotion.map(|_| ()).map_err(Into::into),
-        }
-    }
-
-    async fn read_object(
-        &self,
-        digest: &[u8; 32],
-        kind: CellObjectKind,
-        max_bytes: u64,
-        use_cache: bool,
-    ) -> Result<(Vec<u8>, bool)> {
-        // Hot roots use the same immutable-cache contract as directory nodes;
-        // the inventory path bypasses it to detect missing remote objects.
-        if use_cache
-            && kind == CellObjectKind::Root
-            && let Some(bytes) =
-                cache::get(&self.layout, &self.cell, &self.incarnation, *digest, kind)?
-        {
-            if bytes.len() as u64 > max_bytes {
-                return Err(LtxError::LTXCorrupted);
-            }
-            return Ok((bytes.to_vec(), true));
-        }
-        let _permit = self.host.io_permit().await?;
-        let path = self
-            .layout
-            .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
-        let result = self
-            .layout
-            .store()
-            .get_with_etag_bounded(&path, max_bytes)
-            .await;
-        self.host.observe_ltx_origin_request(
-            crate::LtxReadOrigin::Cold,
-            result.is_ok(),
-            result.as_ref().map_or(0, |(bytes, _)| bytes.len()),
-        );
-        let (bytes, _) = result?;
-        if kind == CellObjectKind::Root {
-            if *blake3::hash(&bytes).as_bytes() != *digest {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            cache::insert(
-                &self.layout,
-                &self.cell,
-                &self.incarnation,
-                *digest,
-                kind,
-                bytes.to_vec().into(),
-            )?;
-        }
-        Ok((bytes.to_vec(), false))
-    }
-
-    async fn verify_cached_metadata(&self, objects: &[([u8; 32], usize)]) -> Result<()> {
-        stream::iter(objects.iter().copied().map(|(digest, size)| async move {
-            let _permit = self.host.io_permit().await?;
-            let path = self.layout.incarnation_object_path(
-                &self.cell,
-                &self.incarnation,
-                &digest,
-                CellObjectKind::Root,
-            );
-            let result = self.layout.store().head(&path).await;
-            self.host
-                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, result.is_ok(), 0);
-            if result?.size != size as u64 {
-                return Err(LtxError::LTXCorrupted);
-            }
-            Ok(())
-        }))
-        .buffer_unordered(OBJECT_FETCH_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-        Ok(())
+    /// Removes a database and its resume sidecars that this replica refused.
+    pub fn discard_resumed(&self, database: &std::path::Path) -> Result<()> {
+        let host = self.host.clone().without_dirty();
+        crate::resume::discard_resumed(database, &host)
     }
 }
 
@@ -1782,23 +833,29 @@ fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) 
         .get(range)
         .filter(|descriptors| !descriptors.is_empty())
         .ok_or(LtxError::TxNotAvailable)?;
-    let base = crate::recovery::full_job_scratch_bytes(
-        graph.document.page_size,
-        graph.document.database_pages,
-    )?;
-    let indexes = graph
-        .descriptors
-        .iter()
-        .try_fold(base, |total, descriptor| {
-            total
-                .checked_add(descriptor.index_length)
-                .ok_or(LtxError::Limit("scratch disk bytes"))
-        })?;
-    selected.iter().try_fold(indexes, |total, descriptor| {
+    let indexes = selected.iter().try_fold(0_u64, |total, descriptor| {
+        total
+            .checked_add(descriptor.index_length)
+            .ok_or(LtxError::Limit(crate::LimitKind::ScratchDiskBytes))
+    })?;
+    let inputs = selected.iter().try_fold(indexes, |total, descriptor| {
         total
             .checked_add(descriptor.info.size_bytes)
-            .ok_or(LtxError::Limit("scratch disk bytes"))
-    })
+            .ok_or(LtxError::Limit(crate::LimitKind::ScratchDiskBytes))
+    })?;
+    let endpoint = selected.last().ok_or(LtxError::TxNotAvailable)?;
+    let pages =
+        (indexes / crate::paged::ENTRY_BYTES as u64).min(u64::from(endpoint.info.database_pages));
+    // Five coexisting files: selected indexes/bodies, encoded LTX, its temporary
+    // varint index, and the fixed-width sidecar. Include worst-case compression
+    // and both index copies; logical database size is not a range-work bound.
+    let ltx = crate::ltx::cut_upper_bound(endpoint.info.page_size, pages)?;
+    pages
+        .checked_mul(30 + crate::paged::ENTRY_BYTES as u64)
+        .and_then(|output_indexes| output_indexes.checked_add(ltx))
+        .and_then(|outputs| inputs.checked_add(outputs))
+        .and_then(|total| total.checked_add(64 << 10))
+        .ok_or(LtxError::Limit(crate::LimitKind::ScratchDiskBytes))
 }
 
 struct AppendInput {
@@ -1809,7 +866,7 @@ struct AppendInput {
 }
 
 enum AppendBody {
-    Native(Arc<PinnedCapture>),
+    Native(Arc<upload::PinnedCapture>),
     Bundle,
 }
 
@@ -1828,165 +885,6 @@ struct PreparedSegment {
 struct DirectoryInput {
     descriptor: SegmentDescriptor,
     index: Bytes,
-}
-
-const MULTIPART_BYTES: usize = 8 << 20;
-
-async fn cleanup_staged(
-    store: &cellule_store::Store,
-    path: &object_store::path::Path,
-) -> Result<()> {
-    match store.delete(path).await {
-        Ok(()) | Err(cellule_store::StorageError::NotFound { .. }) => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-struct PinnedCapture {
-    host: Host,
-    file: Arc<Mutex<Box<dyn crate::environment::FileIo>>>,
-    size: u64,
-}
-
-impl PinnedCapture {
-    async fn open(host: &Host, path: PathBuf, expected_size: u64) -> Result<Arc<Self>> {
-        let source_host = host.clone();
-        let filesystem = Arc::clone(&host.filesystem);
-        host.run(move || {
-            let file = filesystem.open(&path)?;
-            if file.file_len()? != expected_size {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            Ok(Arc::new(Self {
-                host: source_host,
-                file: Arc::new(Mutex::new(file)),
-                size: expected_size,
-            }))
-        })
-        .await?
-    }
-
-    fn read_exact(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("capture file lock poisoned"))?;
-        file.read_exact_at(offset, length)
-    }
-}
-
-struct PinnedCaptureReader {
-    source: Arc<PinnedCapture>,
-    offset: u64,
-}
-
-impl io::Read for PinnedCaptureReader {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.source.size.saturating_sub(self.offset);
-        let length =
-            usize::try_from(remaining.min(bytes.len() as u64)).map_err(io::Error::other)?;
-        if length == 0 {
-            return Ok(0);
-        }
-        let read = self.source.read_exact(self.offset, length)?;
-        bytes[..length].copy_from_slice(&read);
-        self.offset = self
-            .offset
-            .checked_add(length as u64)
-            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
-        Ok(length)
-    }
-}
-
-#[async_trait::async_trait]
-impl cellule_store::MultipartUploadSource for PinnedCapture {
-    async fn byte_len(&self) -> cellule_store::Result<u64> {
-        let file = Arc::clone(&self.file);
-        self.host
-            .run(move || {
-                let file = file
-                    .lock()
-                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
-                file.file_len()
-            })
-            .await
-            .map_err(pinned_storage_error)?
-            .map_err(|error| cellule_store::StorageError::ReadRejected {
-                source: Box::new(error),
-            })
-    }
-
-    async fn read_exact(&self, offset: u64, length: usize) -> cellule_store::Result<Bytes> {
-        let file = Arc::clone(&self.file);
-        self.host
-            .run(move || {
-                let mut file = file
-                    .lock()
-                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
-                file.read_exact_at(offset, length).map(Bytes::from)
-            })
-            .await
-            .map_err(pinned_storage_error)?
-            .map_err(|error| cellule_store::StorageError::ReadRejected {
-                source: Box::new(error),
-            })
-    }
-}
-
-async fn inspect_segment_source(
-    replica: &CellReplica,
-    source: Arc<PinnedCapture>,
-    expected: &crate::SegmentInfo,
-) -> Result<Vec<u8>> {
-    let expected = expected.clone();
-    replica
-        .host
-        .run(move || {
-            let reader = PinnedCaptureReader { source, offset: 0 };
-            let (file, size, digest, pages) = crate::ltx::inspect_reader_with_index(reader)?;
-            if size != expected.size_bytes || digest != expected.blake3 {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            if crate::SegmentInfo::from_inspected(&file, size, digest) != expected {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            crate::paged::encode_index_from_pages(&pages)
-        })
-        .await?
-}
-
-fn pinned_storage_error(error: LtxError) -> cellule_store::StorageError {
-    cellule_store::StorageError::ReadRejected {
-        source: Box::new(error),
-    }
-}
-
-impl VerifiedRoot {
-    fn from_graph(
-        replica: CellReplica,
-        root: RootRef,
-        document: &RootDocument,
-        descriptors: Vec<SegmentDescriptor>,
-    ) -> Result<Self> {
-        let extents = object_extents(&descriptors)?;
-        Ok(Self {
-            root,
-            page_size: document.page_size,
-            database_pages: document.database_pages,
-            schema: document.schema,
-            segment_count: descriptors.len(),
-            directory_height: document.directory_height,
-            pages: CellPagedDatabase {
-                replica,
-                directory_digest: document.directory_digest,
-                directory_height: document.directory_height,
-                extents: Arc::new(extents),
-                page_size: document.page_size,
-                database_pages: document.database_pages,
-                position: root.position,
-            },
-        })
-    }
 }
 
 fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32], ObjectExtent>> {
@@ -2061,31 +959,4 @@ fn directory_changes(
         }
     }
     Ok((changes, retain_through))
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use std::io::Read as _;
-
-    use super::{Host, PinnedCapture, PinnedCaptureReader};
-
-    #[tokio::test]
-    async fn pinned_capture_ignores_later_path_replacement() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("capture.ltx");
-        let displaced = directory.path().join("original.ltx");
-        let original = b"verified capture bytes";
-        std::fs::write(&path, original).unwrap();
-        let source = PinnedCapture::open(&Host::default(), path.clone(), original.len() as u64)
-            .await
-            .unwrap();
-
-        std::fs::rename(&path, &displaced).unwrap();
-        std::fs::write(&path, b"replacement contents!").unwrap();
-
-        let mut reader = PinnedCaptureReader { source, offset: 0 };
-        let mut observed = Vec::new();
-        reader.read_to_end(&mut observed).unwrap();
-        assert_eq!(observed, original);
-    }
 }

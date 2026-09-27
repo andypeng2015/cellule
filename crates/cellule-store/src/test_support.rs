@@ -1,8 +1,5 @@
 //! Test-only object-store instrumentation shared by read-path integration tests.
 
-mod filesystem_cas;
-pub use filesystem_cas::FilesystemCasStore;
-
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;

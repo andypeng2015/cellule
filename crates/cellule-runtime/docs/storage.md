@@ -16,7 +16,7 @@ fsync a valid response-release proof are specified in
 [Follower durability and warm failover](failover-and-followers.md).
 
 `v1` names the one current development format; it is not a release counter.
-Until Cellule ships a persistent Cell format, storage changes update this layout,
+Until Crab ships a persistent Cell format, storage changes update this layout,
 its document schemas, all readers and writers, tests, and documentation in one
 change. Development data may be recreated. Do not introduce a new `cells/vN`
 prefix, dual readers, compatibility branches, or migration code merely because
@@ -57,7 +57,7 @@ Shard counts are powers of two from 1 through 4,096. An existing namespace canno
 cells/v1/identity.json
 cells/v1/apps/<app>/release.json
 cells/v1/apps/<app>/releases/<digest>.json
-cells/v1/apps/<app>/catalog/<00..ff>/head.json
+cells/v1/apps/<app>/catalog/tenants/<tenant>/<00..ff>/head.json
 cells/v1/apps/<app>/catalog/objects/<digest>.json
 cells/v1/apps/<app>/cells/<cell>/control.json
 cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/<digest>.<kind>
@@ -244,7 +244,29 @@ replacement before the next append.
 
 ## Catalog Cells before creating control
 
-The catalog has 256 shards selected by the first Cell-ID byte. Each shard head names at most 256 immutable pages, and each page contains at most 256 sorted entries.
+Each tenant catalog has 256 shards selected by the first Cell-ID byte. Head paths include the tenant because entry identity validation is tenant scoped; immutable pages remain content addressed within the application. Each shard head names at most 256 immutable pages, and each page contains at most 256 sorted entries.
+
+Tenant-scoped catalog heads do not make release or backup management multi-tenant.
+Offline retention marks one tenant and sweeps the application prefix, so it
+rejects a root containing another tenant's catalog before deleting any objects.
+This unreleased head layout replaces application-only heads; development roots
+using the old layout require reprovisioning. There is no fallback reader.
+
+
+A version-two head is the shard locator as well as the page list: every page
+appears with its digest and the first Cell ID it can contain. Routing
+binary-searches those keys and reads one page. Without the locator a lookup
+downloads every page in the shard, so cold routing cost would grow with the
+Cell population. Version-one heads, which carried digests only, are not read.
+
+The reader still verifies what it reads: the page digest, that the page opens
+at its located first Cell ID, that every entry stays inside the shard and in
+order, and that the page ends below the next locator key. A page that
+disagrees with its locator is a hard error rather than a reported absence.
+The locator itself is trusted, because only provisioning writes a head and it
+does so through the head CAS; an object store that loses or rewrites a head is
+a storage fault, not a routing input. A shard head is at most 64 KiB, which
+holds 256 locator pairs.
 
 An entry stores:
 
@@ -255,7 +277,10 @@ An entry stores:
 - Initial code digest
 - Initial schema version
 
-The per-shard ceiling is 65,536 entries. Provisioning uploads the immutable catalog page and CASes its head before creating `control.json`. A crash may leave an unused catalog entry, but never an unproven mutable Cell.
+The per-shard ceiling is 65,536 entries. Provisioning reads the complete
+shard, uploads the immutable catalog pages, and CASes its head before creating
+`control.json`. A crash may leave an unused catalog entry, but never an
+unproven mutable Cell.
 
 `CellAuthority::create_initial` requires a verified `CatalogProof`. Readers recompute every Cell ID and enforce ordering across page boundaries.
 

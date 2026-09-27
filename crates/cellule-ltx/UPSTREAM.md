@@ -1,7 +1,7 @@
 # Upstream sources and compatibility
 
 `cellule-ltx` contains adapted upstream code. This page explains where it came
-from, what the imported implementation changed, which licenses must travel with it, and how to review a
+from, what Crab changed, which licenses must travel with it, and how to review a
 future upstream import.
 
 For usage and the Litestream sidecar comparison, start with
@@ -17,8 +17,8 @@ The direct source snapshot is the unpublished `crates/ltx` package from
 | Pinned revision | [`10cb1303dac710dcb3b557e318e08c855261f68b`](https://github.com/denoland/celld/tree/10cb1303dac710dcb3b557e318e08c855261f68b/crates/ltx) |
 | Imported | 2026-09-13 |
 | Original package | `celld-ltx` `0.0.0`, unpublished |
-| Cellule package | `cellule-ltx` `0.1.0`, unpublished |
-| Ownership now | Adapted Cellule source extracted from Crab; not a vendor mirror or floating dependency |
+| Crab package | `cellule-ltx` `0.1.0`, unpublished |
+| Ownership now | Modified, Crab-owned source; not a vendor mirror or floating dependency |
 
 Celld's Rust implementation was informed by
 [`rustyriver`](https://github.com/mikenomitch/rustyriver), a from-scratch Rust
@@ -69,7 +69,7 @@ were moved behind Crab-owned APIs:
 | `ltx.rs`, `codec.rs`, `lz4_block.rs` | Strict LTX parsing, dual decoding, sized-block encoding, and checked LZ4 helpers |
 | `compactor.rs` | Exact-input local and Cell compaction with endpoint verification |
 | `host.rs` | Injectable filesystem, clock, SQLite VFS, disk admission, telemetry, executor, and worker contracts in `environment.rs` |
-| `paged.rs`, `paged_vfs.rs` | Private authenticated page access plus the writable sparse Cell VFS |
+| `paged.rs`, `paged_vfs.rs` | Private authenticated page access plus writable sparse and immutable read-only Cell VFS modes |
 | `bundle.rs`, `client/bundle.rs` | Checked CRB1 bundles and exact Cell-scoped recovery overlays |
 | `replica.rs`, `replica_compactor.rs` | Design reference only; the standalone epoch-head API was removed |
 | `client/epochs.rs`, `client/mod.rs`, `client/object_store.rs` | Replaced by exact Cell roots and existing `cellule-store` transport |
@@ -107,6 +107,18 @@ commit; it is not a runtime or compatibility contract.
   cannot hide a corrupt later committed frame.
 - Verification checks BLAKE3 metadata, the complete LTX structure, page order
   and coverage, every pre/post rolling database checksum, and the final image.
+
+### Capture representation and failure contract
+
+- A commit whose delta cannot fit `Limits::max_capture_bytes` is captured as a
+  full database image bounded by `Limits::max_file_bytes` instead of failing
+  after the commit. The image keeps the delivered TXID, pre-apply checksum, and
+  chain position, so it stays a valid successor cut and no oversized write can
+  strand a session.
+- The publication path admits a segment above the incremental bound only when
+  its index proves full-page coverage, in the native and bundle paths alike.
+- `LtxError::classify()` publishes the retry, capacity, permanent, ambiguous,
+  and fenced contract. Callers branch on the class, never on error text.
 
 ### Cell replication
 
@@ -159,7 +171,7 @@ The removed standalone Crab epoch-head, public page-map, read-only VFS, and
 scheduler layouts remain outside the Cell graph. `cellule-ltx` intentionally has
 no compatibility reader or alias for them. The shipped-contract decision and
 historical object-layout evidence are recorded in
-the original Crab repository's `standalone-replication-audit.md`.
+[`standalone-replication-audit.md`](../cellule-runtime/docs/standalone-replication-audit.md).
 
 ## Reviewing a future import
 

@@ -1,6 +1,6 @@
 # Build large applications on the Cell runtime
 
-Cellule should expose an application framework above `cellule-runtime` so an
+Crab should expose an application framework above `cellule-runtime` so an
 application owner defines durable Cell types, typed operations, partitioning,
 and cross-Cell workflows without constructing catalogs, authority records,
 LTX replicas, worker pools, or peer routes. The framework keeps the existing
@@ -12,9 +12,14 @@ distributed relational database.
 | Content type | Target design with implemented boundary slice |
 | Audience | Application framework, runtime, and product contributors |
 | Goal | Define the application-owner programming model and the platform API needed to host it |
-| Status | Boundary slice implemented: `cellule-app` supplies deterministic author compilation and a handwritten all-primitive reference application; `cellule-host` supplies the provider-neutral lifecycle shell and the embedding service uses it for serving and offline maintenance. Code generation, full operator ownership, and protected qualification remain open |
+| Status | Boundary slice implemented: `cellule-app` supplies deterministic author compilation and a handwritten all-primitive reference application; `cellule-host` supplies the provider-neutral lifecycle shell and `crab-http-server` uses it for serving and offline maintenance. Code generation, full operator ownership, and protected qualification remain open |
 
 [Back to the Cell runtime index](README.md)
+
+[`crates/cellule-app/examples/authoring.rs`](../../cellule-app/examples/authoring.rs)
+is the minimal compile-checked version of the flow below: one module with its
+migration, one namespace, one cell type, and a finished `CompiledApplication`.
+The prose snippets stay illustrative; the example is what CI compiles.
 
 The [complete Commerce example](application-framework-example.md) remains the
 target qualification shape for custom SQL Cells, KV, Blob, Queue, Cron,
@@ -75,6 +80,14 @@ and data migration with explicit source and destination ownership. Increasing a
 namespace's shard count is therefore a release operation, not a live tuning
 knob.
 
+The implemented `CellType::with_entity_partitions` mode addresses distinct
+entity Cells by a stable 33-byte partition digest under a namespace declared
+with one shard. Generated accessors and `ApplicationHandle::target_for_scope`
+derive that partition from the entity key. `CellType::entity_partition` exposes
+the same derivation for provisioning, and `ApplicationHandle` checks its encoding.
+This provides an application-validated target for an application's own split protocol; it
+does not repartition or migrate data automatically.
+
 ## Separate the author and operator APIs
 
 The public framework has two capability levels.
@@ -108,6 +121,12 @@ The operator API owns the current `CellCatalog`, `CellAuthority`, `CellRuntime`,
 `CellReplica`, scheduler, supervisors, node durability, and routing composition.
 It returns an application-bound client instead of exposing those parts
 individually.
+
+Binding an `ApplicationHandle` is fallible: its author type must name the
+compiled application, and its `CellClient` must carry the same release digest
+as the compiled registry. The host checks this before returning the handle,
+so a client assembled with a different release cannot dispatch through an
+application descriptor that validated a different set of operations.
 
 ## Declare one application
 
@@ -191,9 +210,10 @@ impl CellEntity for Orders {
 
 Partition encoders must be canonical, bounded, and covered by byte fixtures.
 Changing an entity key's encoding requires a new namespace or an explicit
-repartitioning migration. A decoder is not needed on the runtime routing path;
-the catalog retains the original bounded partition bytes for diagnostics and
-recovery.
+repartitioning migration. The implemented entity mode stores a domain-separated
+digest of the scope as its partition bytes. The application retains the mapping
+from logical entity ID to target; the catalog retains the target bytes needed
+for routing and recovery.
 
 ## Write deterministic commands
 
@@ -279,11 +299,72 @@ pub enum ReadConsistency {
 `After(receipt)` additionally requires the same Cell and incarnation and a
 commit sequence at or beyond the receipt. The framework does not expose an
 unfenced local-file read or a global timestamp spanning Cells.
+The implemented client API uses `client::ReadPolicy::{CurrentOwner, Replica}`
+on a cloned capability and an optional minimum `Receipt` on each typed query.
+`CellClient::with_read_policy` and `ApplicationHandle::with_read_policy` select
+the policy; generated clients retain it when deriving scoped accessors.
+Commands, resolution, state streams, and Queue/Effects/Workflow activity lease
+validation still use the owner. Replica queries
+report their actual snapshot receipt, reject a newer minimum with
+`ReplicaBehind`, and never fall back when readers are unavailable.
+
+The public host installs `ReadReplicaManager` for admitted-view refresh and
+drain, and `CellNode::install_read_replica_recruitment` for owner recruitment
+across the application's compiled namespaces. Products supply scope, signed
+membership, and an authenticated activation client. Both the reference app
+and repository service use this host loop and the shared peer activation/status
+dispatch. Reader selection remains advisory; each recipient rechecks owner,
+policy, membership, and resource admission before opening a snapshot.
+
+Host code supplies `CellClient::with_read_replicas` with the shared runtime
+`ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
+live directory, an authenticated peer client, and an optional local
+admitted-view resolver. The same router serves explicit HTTP issue-detail
+reads. It loads authority and the S3 desired count concurrently, rejects a
+policy from a different incarnation, and consults signed live membership. It
+prefers lower ingress-observed in-flight load, and bounds selection and all
+attempts by one five-second deadline. Peer attempts carry the remaining budget.
+Advisory reader discovery shares a bounded one-second membership snapshot
+across directory clones and Cells, with one concurrent refresh. Selection
+filters expired advertisements each time; a failed expired refresh returns an
+error. Successful local enrollment and withdrawal invalidate this discovery
+snapshot.
+The same signed snapshot supplies the owner's immutable boot identity for
+physical-node exclusion; an absent owner is inspected directly, including its
+retirement tombstone. Authority, peer authentication, and offline maintenance
+scans remain fresh.
+The author handle does not expose storage, local files, or routing internals.
+Fresh authority checks remain mandatory before a replica releases a result.
+Blob queries hydrate content-addressed parts with digest and length checks;
+missing or reclaimed parts fail instead of returning unverified bytes.
+The object durability profile supplies the all-node-loss contract;
+[Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+tracks remaining qualification work. Replica views now fault authenticated
+pages from their exact root, with no full local database restore. Each view
+provisionally reserves 12 MiB and four descriptors, including a conservative
+charge for the shared page cache; refresh retains both views until old queries
+finish. Sparse I/O uses the query deadline and preserves its source error.
 
 ## Generate an application client
 
 The generated client binds tenant, application, registry, and routing once.
 Each namespace accessor accepts only its declared key type.
+
+The current Rust `cellule_app::cell_client!` binding generates namespace
+accessors and typed command, prepare, query, and resolution methods from
+explicit stable IDs. Construction checks the compiled registry and operation
+traits; each accessor accepts a declared `CellKey` whose canonical bytes feed
+the compiled `CellType` entity or fixed-shard contract. Namespace-level primitive
+helpers require fixed shards; explicitly targeted SQL and effect handles accept
+entity Cells. The reference application's independent descriptor-byte test, compile-fail
+examples, and three-node `CellNode` suite cover this initial binding. The
+rollout test adds a generated query and retains predecessor code while old and
+new clients overlap. It then publishes a code-only migration, rejects stale
+capabilities and predecessor clients, and recovers exact receipts on a fresh
+host. The RustFS variant uses the same path with real object storage. This is
+a correctness gate with one process hosting the nodes; additive schema changes
+and continuous traffic during rolling container replacement remain unqualified.
+A general schema-driven generator and generated transport adapters remain open.
 
 ```rust,ignore
 let commerce = CommerceClient::new(node.application::<Commerce>()?);
@@ -668,7 +749,7 @@ constructed current `Registry`.
 - Keep HTTP authentication and provider construction in the product boundary.
 - Expose explicit provision, status, drain, and shutdown operations.
 
-Completion proof: the embedding service uses the facade, and architecture checks
+Completion proof: `crab-http-server` uses the facade, and architecture checks
 reject direct production composition around it.
 
 ### Phase 3: complete application lifecycle
@@ -738,5 +819,5 @@ The application framework is complete when an owner can:
     the framework silently weaken its invariants.
 
 Until the node facade, generated author API, lifecycle tests, and capacity
-qualification exist, application modules remain internal Cellule integrations
+qualification exist, application modules remain internal Crab integrations
 rather than a supported general application platform.

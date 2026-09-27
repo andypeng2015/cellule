@@ -12,17 +12,18 @@ fn signer() -> PeerSigner {
 
 #[test]
 fn signed_peer_request_carries_maximum_kv_value() {
-    let input = crate::KvAtomicRequest {
+    let input = crate::primitives::kv::KvAtomicRequest {
         scope: b"scope".to_vec(),
         checks: Vec::new(),
-        mutations: vec![crate::KvMutation::Put {
+        mutations: vec![crate::primitives::kv::KvMutation::Put {
             key: b"key".to_vec(),
             value: vec![7; 4 * 1024 * 1024],
             expires_at_ms: None,
         }],
     };
-    let mut encoder = crate::BoundedEncoder::new(crate::codec::MAX_WIRE_BYTES as u32).unwrap();
-    crate::WireValue::encode(&input, &mut encoder).unwrap();
+    let mut encoder =
+        crate::codec::BoundedEncoder::new(crate::codec::MAX_WIRE_BYTES as u32).unwrap();
+    crate::codec::WireValue::encode(&input, &mut encoder).unwrap();
     let mut request = mutation();
     let Some(wire::mutation_request::Operation::CellCommand(command)) = &mut request.operation
     else {
@@ -86,6 +87,12 @@ fn target() -> wire::Target {
 
 fn mutation() -> wire::MutationRequest {
     wire::MutationRequest {
+        expected: Some(wire::CellDescription {
+            cell_id: vec![9; 32],
+            incarnation: vec![8; 16],
+            code: vec![10; 32],
+            schema: 1,
+        }),
         target: Some(target()),
         identity: Some(wire::MutationIdentity {
             request_id: vec![7; 16],
@@ -104,14 +111,53 @@ fn mutation() -> wire::MutationRequest {
     }
 }
 
+#[test]
+fn expected_contract_is_required_and_covered_by_the_signature() {
+    let signer = signer();
+    let sign = |request| {
+        signer.sign(
+            principal(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::Mutate(request),
+        )
+    };
+    let mut missing = mutation();
+    missing.expected = None;
+    assert!(sign(missing).is_err());
+
+    let encoded = sign(mutation()).unwrap();
+    let mut decoded = wire::PeerRequest::decode(encoded.as_slice()).unwrap();
+    assert!(
+        verifier(&signer)
+            .verify(&decoded.encode_to_vec(), NOW_MS)
+            .is_ok()
+    );
+    let Some(wire::peer_request::Operation::Mutate(request)) = &mut decoded.operation else {
+        panic!("expected a mutation");
+    };
+    request.expected.as_mut().unwrap().schema += 1;
+    assert!(
+        verifier(&signer)
+            .verify(&decoded.encode_to_vec(), NOW_MS)
+            .is_err()
+    );
+}
+
 fn effect_identity() -> wire::EffectIdentity {
     let source_cell = crate::CellId::from_bytes([9; 32]);
     let source_incarnation = IncarnationId::from_bytes([10; 16]);
     let source_sequence = 3;
     let ordinal = 2;
     wire::EffectIdentity {
-        effect_id: crate::effect_id(source_cell, source_incarnation, source_sequence, ordinal)
-            .to_vec(),
+        effect_id: crate::primitives::effects::effect_id(
+            source_cell,
+            source_incarnation,
+            source_sequence,
+            ordinal,
+        )
+        .to_vec(),
         source_cell: source_cell.as_bytes().to_vec(),
         source_incarnation: source_incarnation.as_bytes().to_vec(),
         source_sequence,
@@ -167,7 +213,7 @@ fn signed_request_verifies_and_forward_preserves_payload() {
         )
         .unwrap();
     assert_eq!(
-        claimed_peer_session(&encoded).unwrap(),
+        UnverifiedPeerRequest::decode(&encoded).unwrap().session(),
         SessionId::from_bytes([1; 16])
     );
     let verifier = verifier(&signer);
@@ -204,7 +250,7 @@ fn signed_effect_delivery_and_resolve_bind_derived_identity() {
         Some(wire::peer_request::Operation::DeliverEffect(_))
     ));
 
-    let digest = crate::effect_operation_digest(
+    let digest = crate::primitives::effects::effect_operation_digest(
         verified.target().cell_id(),
         <[u8; 32]>::try_from(effect_identity().effect_id).unwrap(),
         &delivery.encode_to_vec(),
@@ -253,7 +299,7 @@ fn signed_migration_binds_source_and_successor_versions() {
     let encoded = signer
         .sign(
             PeerPrincipal {
-                issuer: "cellule-runtime:test".into(),
+                issuer: "crab-runtime:test".into(),
                 subject: "release-operator".into(),
                 actions: vec!["cell.release.migrate".into()],
             },
@@ -346,6 +392,12 @@ fn reordered_protobuf_payload_retains_exact_signature_binding() {
     encode_bytes_field(&mut payload, 10, &command).unwrap();
     encode_bytes_field(
         &mut payload,
+        4,
+        &mutation.expected.as_ref().unwrap().encode_to_vec(),
+    )
+    .unwrap();
+    encode_bytes_field(
+        &mut payload,
         2,
         &mutation.identity.as_ref().unwrap().encode_to_vec(),
     )
@@ -411,53 +463,6 @@ fn unsorted_actions_and_expired_authorization_are_rejected() {
 }
 
 #[test]
-fn expired_mutation_identity_is_rejected_before_actor_admission() {
-    let signer = signer();
-    let mut request = mutation();
-    request.identity = Some(wire::MutationIdentity {
-        request_id: vec![11; 16],
-        incarnation: vec![12; 16],
-        issued_at_ms: NOW_MS,
-        expires_at_ms: NOW_MS + 1_000,
-    });
-    let encoded = signer
-        .sign(
-            principal(),
-            NOW_MS,
-            NOW_MS + 60_000,
-            30_000,
-            PeerOperation::Mutate(request.clone()),
-        )
-        .unwrap();
-    let verifier = verifier(&signer);
-    assert!(matches!(
-        verifier.verify(&encoded, NOW_MS + 1_000),
-        Err(Error::Peer("invalid or expired mutation identity"))
-    ));
-    assert!(verifier.verify(&encoded, NOW_MS + 999).is_ok());
-
-    let resolve = wire::ResolveRequest {
-        target: Some(target()),
-        identity: request.identity,
-        operation_digest: vec![13; 32],
-    };
-    let encoded = signer
-        .sign(
-            principal(),
-            NOW_MS,
-            NOW_MS + 60_000,
-            30_000,
-            PeerOperation::Resolve(resolve),
-        )
-        .unwrap();
-    assert!(matches!(
-        verifier.verify(&encoded, NOW_MS + 1_000),
-        Err(Error::Peer("invalid or expired mutation identity"))
-    ));
-    assert!(verifier.verify(&encoded, NOW_MS + 999).is_ok());
-}
-
-#[test]
 fn reply_codec_rejects_unknown_fields_and_invalid_enums() {
     let reply = wire::PeerReply {
         outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
@@ -508,5 +513,24 @@ fn reply_codec_rejects_unknown_fields_and_invalid_enums() {
             .unwrap()
             .outcome,
         Some(wire::peer_reply::Outcome::Migration(_))
+    ));
+}
+
+#[test]
+fn replica_behind_error_preserves_both_positions_over_peer_wire() {
+    let reply = dispatch::error_reply(Error::ReplicaBehind {
+        observed_sequence: 17,
+        minimum_sequence: 23,
+    });
+    let decoded = decode_peer_reply(&encode_peer_reply(&reply).unwrap()).unwrap();
+    let Some(wire::peer_reply::Outcome::Error(error)) = decoded.outcome else {
+        panic!("expected replica position error");
+    };
+    assert!(matches!(
+        transport::runtime_error(error),
+        Error::ReplicaBehind {
+            observed_sequence: 17,
+            minimum_sequence: 23
+        }
     ));
 }

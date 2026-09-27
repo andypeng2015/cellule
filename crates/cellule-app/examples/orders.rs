@@ -7,12 +7,17 @@ use std::{
 
 use cellule_app::{ApplicationHandle, CellApplication, CellType};
 use cellule_ltx::{CellReplica, DiskBudget, Host, Limits};
+use cellule_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use cellule_runtime::control::{Owner, authority::CellAuthority};
+use cellule_runtime::identity::{IncarnationId, RequestId};
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue, register_sql};
+use cellule_runtime::registry::OperationDescriptor;
 use cellule_runtime::{
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellRuntime, CellStorageLayout, CellTarget, Digest, Error,
-    IncarnationId, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
-    NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlBatch,
-    SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, partition_for_shard, register_sql,
+    ApplicationId, BuildDescriptor, CatalogRole, CellClient, CellModule, CellRuntime, CellTarget,
+    Digest, Error, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
+    NamespaceId, RegistryBuilder, SessionId, SqlModule, SqlWorkerPool, TenantId,
+    partition_for_shard,
 };
 use cellule_store::Store;
 use object_store::{memory::InMemory, path::Path};
@@ -165,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         let client = CellClient::local(registry, handle);
         let typed =
-            ApplicationHandle::<OrdersApp>::new(client, application, tenant, application_id);
+            ApplicationHandle::<OrdersApp>::new(client, application, tenant, application_id)?;
         let sql = typed.sql::<Orders>(target)?;
         let now_ms = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
         let committed = sql

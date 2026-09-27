@@ -37,6 +37,14 @@ flowchart LR
 ```
 
 `CellHandle` is a cloneable mailbox sender. It never exposes a SQLite connection. Stable Cell-ID routing keeps one `Db` on one operating-system thread until close.
+Bootstrap passes the runtime-configured replica host to both that worker-owned
+`Db` and the publisher, so local filesystem and resource admission apply to
+the same captured cuts.
+`CellNode` binds the compiled application's per-namespace database and capture
+ceilings to its runtime before serving. Every bootstrap, idle acquisition, and
+takeover checks the supplied `CellReplica` limits before changing ownership or
+opening a root. Restored paths also check the recovery-store limits. Standalone
+`CellRuntime` users supply their own LTX policy.
 
 The node bounds:
 
@@ -46,7 +54,47 @@ The node bounds:
 - Per-Cell request and byte admission
 - Node-wide memory, disk, and activity admission
 
+Worker-job admission uses one slot per SQL worker. A job waiting for a busy
+worker holds neither another worker's slot nor a node worker-job reservation.
+Once dispatched, the job owns its slot and reservation until execution ends,
+including when its caller is canceled. Lifecycle and publication-confirmation
+messages retain their bounded worker queue and do not need a job permit.
+
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
+
+`CellClient::with_local_resolver` binds product owner selection before the
+underlying transport. Its `LocalCellResolver` returns a local handle, `None` to
+delegate, or an error that stops dispatch. Describe, command, query, and mutation
+resolution share this path. Products may restore an idle cataloged Cell using
+runtime admission and authority CAS; the framework's default runtime resolver
+only looks up existing ownership. Apply admission backpressure after the local
+resolver so the same request budgets cover local and remote invocations.
+
+An embedding service can opt into `CellClient::with_admission_backpressure`
+when its request budget permits waiting for owner capacity. Client clones share
+finite call-count and encoded-input byte budgets; exhausting either still fails
+immediately. Mailbox operations acquire per-Cell FIFO semaphores using the
+runtime's request and byte limits.
+The byte charge is encoded input plus the operation's maximum result size, so
+routing and execution can overlap within the owner bounds. Weighted FIFO
+admission prevents small calls from starving older large waiters. Different
+Cells have independent gates, retained only by admitted calls. Known capacity
+refusals from other callers receive paced retries until the admission
+wait expires. Commands retain their request identity, digest, and expected
+incarnation, and revalidate expiry before each attempt. Fencing and ambiguous
+outcomes are returned unchanged, including ambiguity caused by capacity during
+publication. The wait limit never cancels an accepted attempt. Describe shares
+the client budgets and capacity retry, but skips the owner mailbox gate because
+metadata description does not enter that mailbox. Queries and resolution use
+the mailbox policy; replica queries retain their
+separate admission path. Unconfigured clients retain immediate refusal.
+Each transport stage has its own wait budget; an encompassing typed or HTTP
+operation can take longer. Command expiry is still rechecked before dispatch.
+
+The input budget charges the retained envelope, one attempted copy, and envelope
+overhead. Runtime result and mailbox reservations remain authoritative. This
+does not bound HTTP request bodies or caller-owned typed inputs; the embedding
+service must account for those separately.
 
 ## Execute commands in six phases
 
@@ -79,9 +127,71 @@ The worker transaction applies this procedure:
 5. Execute the registered synchronous handler
 6. Store success or durable rejection in `sys_requests`
 7. Advance `sys_meta.sequence` and derive `next_due_ms`
-8. Commit SQLite and capture every unpublished cut
+8. Validate any durable database page reservations after all receipt and metadata writes
+9. Commit SQLite and capture every unpublished cut
 
-Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection.
+Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
+
+SQLite may automatically roll back the whole command on capacity or interruption
+errors. The managed LTX writer recognizes completed rollback using autocommit
+and its WAL commit observer, preserves the original error, and keeps the Cell
+servable. No request receipt or commit sequence advances for that failed
+command. An observed commit or failed rollback still requires fencing; an
+unreachable result must never be reported as a proven rollback.
+
+For typed commands, a direct SQLite `FULL` remains the original SQLite error
+locally and maps to `RESOURCE_EXHAUSTED` / `NOT_STARTED` over peers. Command
+execution wraps fenced commit/publication errors as unknown before this mapping;
+a nested `FULL` therefore cannot become a refusal. This mapping is specific to
+typed command execution. Migration and other peer operations retain their own
+outcome contracts.
+
+### Bounded application BLOB writes
+
+`CommandContext::write_sql_blob` fills an already allocated BLOB at a byte offset,
+with at most 1 MiB of operation data per call. An application can allocate an
+image with SQL `zeroblob` and fill it in bounded slices without repeatedly
+allocating replacement images. Allocation, writes, and application indexes stay
+inside the command savepoint and publish through the normal LTX boundary.
+Propagate write errors so partial images roll back.
+
+The method opens only the main database, rejects runtime/primitive and SQLite
+internal table names, and closes the handle before returning. SQLite incremental
+I/O does not invoke the SQL authorizer, triggers, or CHECK constraints; applications
+must maintain their invariants explicitly in the same command. It cannot grow
+the BLOB. SQLite rejects unsupported table types and writable indexed columns.
+The SQL capability integration fixture covers bounds, protected names, rollback
+on rejection/error, and byte-for-byte recovery after publication.
+
+### Durable database capacity for deferred work
+
+A Cell can install `primitives::capacity::SCHEMA` and use
+`CommandContext::reserve_database_capacity(key, bytes)` during prepare. The
+primitive rounds bytes up to pages and records a durable claim under a stable
+key. Repeating the key requires the same rounded count. The claim remains until
+an explicit release; timeouts never reclaim it. No padding BLOB is written.
+
+Before committing commands, effect deliveries, bootstrap, or migrations, the
+executor checks `page_count - freelist_count + reserved_pages <= max_page_count`.
+This check includes runtime receipts and metadata. Refusal rolls back all writes,
+leaves no receipt, and keeps a proven-rollback owner usable. A running total makes
+the check independent of the number of claims. Cells without the primitive have
+no reservation check beyond their existing SQLite capacity limit.
+
+A resolver releases its own claim before applying deferred work within the same
+command. Success publishes both together; rejection or failure restores the
+claim. The final check still protects other claims. SQL and incremental BLOB
+access cannot modify the protected `capacity_` tables. Trusted migrations must
+preserve both tables and their accounting; they are not an untrusted SQL API.
+
+This reserves SQLite page capacity only. Applications must bound their own
+future page demand, including index changes and runtime receipts. WAL, capture,
+local disk, and memory admission remain independent. `database_used_bytes`
+reports occupied pages and excludes reusable freelist pages.
+
+The runtime lifecycle capacity tests cover receipt and effect refusal, failed
+release, changed-session/address root restore, bootstrap, and migration. SQL
+capability tests cover direct access and incremental BLOB protection.
 
 ## Publish before replying
 
@@ -89,8 +199,10 @@ Handler errors roll back the application savepoint. Runtime ledger updates still
 
 | Publication result | Actor action | Caller outcome |
 | --- | --- | --- |
+| Capture fails after SQLite commit | Fence local worker; restore from authority | Outcome unknown until resolved |
 | CAS accepted | Confirm root, prune exact cuts | Committed result with receipt |
 | Response lost, origin equals proposal | Adopt exact successor | Committed result with receipt |
+| Root accepted, local cut pruning fails, object-only proof | Fence local worker; recover from the pinned root | Outcome unknown until resolved |
 | Transient preparation failure | Retry with bounded backoff and renew ownership | Caller continues waiting |
 | CAS winner differs | Fence, discard local handle, reload authority | Outcome unknown |
 | Deadline expires after SQL started | Interrupt SQLite, fence admission, wait for callback exit | Outcome unknown |
@@ -102,6 +214,9 @@ head remain readable while the exact object root catches up; if the root still
 cannot be published when the grace period expires, the Cell fences and leaves
 the node-log tail for takeover recovery. A control conflict, lease loss, or
 non-storage publication error fences immediately.
+The publication-start trace records its queue wait, queued count and bytes,
+and signed commit-sequence lag from the last published root. A negative lag
+would expose a root rewind instead of being clamped away in observability.
 
 The actor never reruns a handler after SQLite may have started it. `Resolve` reads the durable ledger at an authoritative root.
 
@@ -158,6 +273,21 @@ let observed = issues
 
 Queries run on the owning SQL worker under a read-only application boundary. They don't produce LTX, modify control, or bypass namespace and schema checks.
 
+Replica SQL shares the owner's bounded SQL worker admission pool. Its slot
+stays charged until the blocking query exits, including cancellation. Cell peer
+codecs use the node primitive-job ledger with deadline-bounded waiting; S3
+session enrollment runs outside the CPU reservation so provider latency does
+not reject otherwise idle concurrent reads.
+
+Explicit replica routing also has one five-second deadline covering discovery
+and every selected-reader attempt. Each attempt receives an equal share of the
+remaining time divided by the remaining candidates, so a blackholed connection
+or stalled local resolver leaves time to try a healthy reader. Local and remote
+attempts share this rule; the remote request carries the reduced time budget.
+Receipt, authority, and authorization checks still apply, and replica routing
+never falls back to the owner. A cancelled SQL waiter retains its snapshot and
+admission until the running SQL job exits.
+
 ## Apply one absolute operation deadline
 
 Native commands and queries receive a five-second wall deadline. The same deadline covers:
@@ -168,9 +298,34 @@ Native commands and queries receive a five-second wall deadline. The same deadli
 - Sparse page faults
 - Object-store range reads triggered by the sparse VFS
 
+Worker admission and the native queue share an atomic start/cancel boundary.
+If the deadline wins before execution starts, the worker skips the operation;
+commands and queries return a deadline error, and resolution returns Unknown.
+The untouched Cell remains usable. Cancellation of a caller's response future
+alone does not cancel an accepted mutation. Reservations stay held until the
+worker acknowledges deadline cancellation or the running callback exits.
+Background hydration likewise retries a queued expiry without fencing or marking
+hydration complete. Migration is different: it has already closed the old
+capability, so any failure still fences and recovers ownership.
+
 Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline, admission closes immediately, but the runtime retains worker and byte permits until the callback exits.
 
 After exit, recovery closes the SQLite handle and reloads control. It releases only authority that still names the same Cell, incarnation, code, schema, owner, and epoch.
+
+HTTP peer codecs use a separate primitive-job budget. Immediate and queued
+admission share that budget; queued admission checks one absolute deadline
+before waiting and after waking. Canceling a waiter reserves nothing, and
+runtime shutdown wakes queued callers with `RuntimeClosed`. Callers must
+reserve retained request bytes before waiting. Enrollment storage I/O releases
+the codec slot; decoded requests remain untrusted until signature verification
+rechecks the signed enrollment's lifetime.
+
+The HTTP receiver applies its received transport budget to enrollment,
+resolution, activation, dispatch waiting, and reply encoding. That budget
+starts after the request body arrives and remains distinct from the native
+work deadline above. Canceling the HTTP wait does not cancel an accepted
+mutation's durable completion; the caller resolves an ambiguous result using
+the same stable request identity.
 
 ## Recover from panic without losing the worker
 
@@ -209,6 +364,28 @@ Any control change restarts the 15-second observation period. The winner hydrate
 
 Sparse activation starts with no materialized pages. Full recovery reserves destination bytes before download and installs through an exclusive same-directory scratch file.
 
+## Reuse a local database only under a continuity record
+
+A clean release writes one resume record beside the database it closed. The
+record names the Cell, incarnation, schema, installed code, and the exact
+published root the file holds; the capture continuation and dense page
+checksums live in `cellule-ltx` sidecars next to the same file.
+
+A same-node wake matches that record against the observed control and then
+moves the file onto the fresh activation path instead of restoring the root.
+The record never authorizes a tick, a read, or a write: the worker still
+verifies `sys_meta` identity, schema, sequence, and the SQLite position against
+the authoritative root, so a stale, foreign, torn, or half-written image is
+discarded and restored instead of served. The ownership epoch is deliberately
+absent from the match, because acquiring an idle Cell raises the epoch while
+leaving the root untouched.
+
+Two fences keep the fast path honest. A database whose WAL is not checkpointed
+is refused, because the file may sit behind the continuation it would seed from;
+and a sparse activation must be fully materialized, because an unfaulted page
+is a hole rather than data. Every failure above falls back to the exact restore
+and costs one cold activation, never correctness.
+
 ## Renew and self-fence ownership
 
 One node-level scanner renews owned Cells every three seconds. A mutation publication also advances owner progress.
@@ -223,16 +400,56 @@ Bootstrap and every command transaction derive the earliest durable deadline fro
 
 The node scheduler:
 
-1. Reads revision-pinned catalog pages
-2. Assigns 256 catalog shards through rendezvous hashing
-3. Scans at most 128 due Cells per cycle
-4. Sends the typed maintenance Tick locally or to the authenticated owner
-5. Acquires an idle or stale Cell only when no valid owner can execute the Tick
-6. Runs registered activity and effect supervisors outside SQLite
+1. Ticks resident Cells whose published due time has passed, from memory
+2. Consumes due hints: one key per released deadline, listed from the current
+   minute bucket and the five behind it, each confirmed against its control
+3. Reads revision-pinned catalog pages and assigns 256 catalog shards through
+   rendezvous hashing
+4. Runs the shard scan as a backstop every thirtieth cycle, visiting at most
+   128 due Cells per scan
+5. Sends the typed maintenance Tick locally or to the authenticated owner
+6. Acquires an idle or stale Cell only when no valid owner can execute the Tick
+7. Runs registered activity and effect supervisors outside SQLite
 
-A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another.
+Steps 1 and 2 run every cycle, so a Cell this node owns and a Cell whose owner
+released it with a deadline are both ticked without a population scan. Step 4
+is what covers a missing hint — a failed write, a hint older than its window,
+or a Cell released before hints existed — and bounds that case at one backstop
+period instead of a full shard pass.
+
+A hint names one released Cell's deadline in the minute bucket that deadline
+falls in, and a listing walks the current bucket and the five behind it. A
+release whose deadline is already further behind than that window publishes
+nothing: no listing would see the key, so the backstop covers it instead of
+leaving behind an object nothing consumes. A key a listing meets but cannot
+parse is deleted, so a foreign object under the prefix cannot be re-listed
+forever.
+
+A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
+
+When node-log recovery is configured, each scheduler cycle uses
+`NodeDirectory::live_for_recovery` to read live membership and expired-log
+candidates in one fresh directory scan. Candidate selection reuses that bounded
+observation for its existing one-second lifetime; claimant admission and the
+fencing CAS still reload authoritative records. Failed or cancelled fresh scans
+discard the previous observation. Peer authentication, release activation and
+ordinary `live` calls retain their direct reads.
+
+## Shed under node pressure
+
+The actor samples its own reservation ledger four times a second: memory is resident plus retained bytes, disk is the replica budget, and jobs are the worker, primitive, and hydration aggregate the placement block advertises. The sample therefore reports what this node admits, not a host guess.
+
+The hysteretic classifier enters shedding at 80 percent on any dimension and returns to normal below 60 percent, and either transition needs evidence sustained for one second. While shedding, the actor starts one bounded eviction per sample through the same movement budget and victim selection a transfer uses, so a hot node releases settled Cells instead of admitting work it cannot hold. A brief spike never triggers a move.
 
 ## Drain in ownership order
+
+`CellRuntime::active_cell_targets` returns tenant-scoped identities from the
+actor's verified activation proofs. It includes active owners even if a caller
+cancelled after activation, excludes draining owners, and refuses a fenced node.
+The inventory is bounded by local residency and is advisory: movement still needs
+`idle_transfer_candidates` and the exact-generation `release_idle_cell` preflight.
+Catalog proofs retain their original tenant/application in memory; catalog
+serialization and root formats do not change.
 
 A clean per-Cell drain closes SQLite before releasing control to `Idle`. Releasing control first would allow a successor to open while the previous writer still owns local mutable state.
 
@@ -247,11 +464,22 @@ flowchart TD
     Sql[Close SQLite handles]
     Release[Release owned controls]
     Pool[Close and join SQL and blocking pools]
+    Log[Close the object-covered node log]
+    Session[Stop heartbeats and withdraw the session]
 
-    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool
+    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool --> Log --> Session
 ```
 
-Readiness closes as soon as terminal drain starts. Remaining runtime, pool, or handle clones stay permanently closed after shutdown.
+Readiness closes as soon as terminal drain starts. Lease maintenance continues
+through Cell publication and the node-log close barrier; early withdrawal
+fences that authority and makes the drain fail. Work and lease tasks share one
+bounded supervisor and one absolute shutdown deadline. Remaining runtime,
+pool, or handle clones stay permanently closed after shutdown.
+The SQL pool also waits for admitted immutable-reader queries and snapshot
+opens running on blocking tasks. Closing reader admission and joining the
+dedicated SQL threads alone does not drain those tasks. Their existing job
+charges remain held until execution exits, including after caller cancellation;
+offline retention cannot proceed through a successful node drain before then.
 
 ## Preserve these invariants
 

@@ -1,11 +1,21 @@
 use super::fleet::{balancer_round_trip, peer_round_trip, start_peer_servers};
-use super::*;
-use std::{collections::HashMap, net::SocketAddr, time::SystemTime};
+use crate::*;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Mutex,
+    time::{Duration, SystemTime},
+};
 
-use cellule_runtime::{
+use cellule_host::{CellNode, CellNodeBuilder};
+use cellule_runtime::fleet::telemetry::CellTelemetry;
+use cellule_runtime::node::lease::NodeLeaseGuard;
+use cellule_runtime::node::log::DurabilitySource;
+use cellule_runtime::peer::{
     EffectPeerClient, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal,
     PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
 };
+use tokio_util::sync::CancellationToken;
 
 pub(super) fn now_ms() -> i64 {
     i64::try_from(
@@ -37,7 +47,10 @@ pub(super) fn item_id(index: usize) -> [u8; 16] {
 }
 
 pub(super) fn install_sql_tables(tx: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    tx.execute_batch(SQL_SCHEMA)?;
+    tx.execute_batch(
+        "CREATE TABLE orders(id INTEGER PRIMARY KEY, total_cents INTEGER NOT NULL); \
+         CREATE TABLE invoice_receipts(schedule_id BLOB NOT NULL, occurrence INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(schedule_id, occurrence));",
+    )?;
     Ok(())
 }
 
@@ -115,7 +128,12 @@ pub(super) fn owner_routes(
 
 pub(super) struct PerfFixture {
     _directory: tempfile::TempDir,
-    runtimes: Vec<CellRuntime>,
+    pub(super) nodes: Vec<CellNode>,
+    pub(super) layout: Option<CellStorageLayout>,
+    leases: Vec<NodeLeaseGuard>,
+    pub(super) round_trip: Option<Arc<dyn PeerRoundTrip>>,
+    pub(super) owned_handles: Vec<Vec<CellHandle>>,
+    pub(super) durability: Vec<Arc<DurabilityRecorder>>,
     pub(super) typed: ApplicationHandle<ReferenceApplication>,
     pub(super) registry: Arc<Registry>,
     pub(super) client: CellClient,
@@ -125,29 +143,90 @@ pub(super) struct PerfFixture {
     servers: Vec<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Default)]
+pub(super) struct DurabilityRecorder(Mutex<Vec<(DurabilitySource, Duration)>>);
+
+impl DurabilityRecorder {
+    pub(super) fn object_waits(&self) -> Vec<Duration> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(source, waited)| (*source == DurabilitySource::Object).then_some(*waited))
+            .collect()
+    }
+}
+
+impl CellTelemetry for DurabilityRecorder {
+    fn durability_proof(&self, source: DurabilitySource, waited: Duration) {
+        self.0.lock().unwrap().push((source, waited));
+    }
+}
+
 impl PerfFixture {
     pub(super) async fn start(nodes: usize) -> Self {
+        Self::start_with_successor(nodes, None).await
+    }
+
+    pub(super) async fn start_with_store(
+        nodes: usize,
+        store: Store,
+        root: object_store::path::Path,
+    ) -> Self {
+        Self::start_configured(nodes, None, store, root).await
+    }
+
+    pub(super) async fn start_with_successor(
+        nodes: usize,
+        successor: Option<Arc<cellule_app::CompiledApplication>>,
+    ) -> Self {
+        Self::start_configured(
+            nodes,
+            successor,
+            Store::new(Arc::new(InMemory::new())),
+            object_store::path::Path::from("reference-performance"),
+        )
+        .await
+    }
+
+    pub(super) async fn start_configured(
+        nodes: usize,
+        successor: Option<Arc<cellule_app::CompiledApplication>>,
+        store: Store,
+        root: object_store::path::Path,
+    ) -> Self {
         assert!(nodes == 1 || nodes == 3);
+        assert!(successor.is_none() || nodes == 3);
         let application = Arc::new(compiled());
         let registry = application.registry();
         let tenant = TenantId::from_bytes([81; 16]);
         let application_id = ApplicationId::from_bytes([82; 16]);
-        let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(
-            store.clone(),
-            object_store::path::Path::from("reference-performance"),
-            *application_id.as_bytes(),
-        );
+        let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
         let directory = tempfile::TempDir::new().unwrap();
-        let runtimes = (0..nodes)
+        let mut leases = Vec::new();
+        let mut durability = Vec::new();
+        let hosts = (0..nodes)
             .map(|node| {
-                CellRuntime::new_with_replica_host(
-                    SqlWorkerPool::new(4, 32).unwrap(),
-                    64 * 1024 * 1024,
-                    node_session(node),
-                    reference_host(),
-                )
-                .unwrap()
+                let node_application = if node == 0 {
+                    successor.as_ref().unwrap_or(&application)
+                } else {
+                    &application
+                };
+                let host = CellNodeBuilder::new(Arc::clone(node_application))
+                    .with_runtime(SqlWorkerPool::new(4, 32).unwrap(), 64 * 1024 * 1024)
+                    .with_session(node_session(node))
+                    .with_replica_host(reference_host())
+                    .build()
+                    .unwrap();
+                let recorder = Arc::new(DurabilityRecorder::default());
+                host.install_telemetry(recorder.clone()).unwrap();
+                durability.push(recorder);
+                host.install_task_group(CancellationToken::new(), CancellationToken::new())
+                    .unwrap();
+                let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+                host.install_node_lease(lease.clone()).unwrap();
+                leases.push(lease);
+                host
             })
             .collect::<Vec<_>>();
         let cells = perf_cells();
@@ -158,7 +237,7 @@ impl PerfFixture {
         {
             let node = cell_index % nodes;
             let handle = bootstrap_reference_cell(
-                &runtimes[node],
+                &hosts[node].runtime(),
                 &registry,
                 &layout,
                 &directory,
@@ -196,7 +275,7 @@ impl PerfFixture {
             registry.release_digest(),
             signer.verifying_key(),
         ));
-        let (client, peer, servers) = if nodes == 1 {
+        let (client, peer, servers, round_trip) = if nodes == 1 {
             let client = CellClient::local_many(Arc::clone(&registry), handles).unwrap();
             let dispatcher = Arc::new(PeerDispatcher::new(
                 Arc::clone(&registry),
@@ -220,19 +299,29 @@ impl PerfFixture {
                     dispatcher,
                 }),
             );
-            (client, peer, Vec::new())
+            (client, peer, Vec::new(), None)
         } else {
-            let (round_trip, servers) = start_peer_servers(&registry, verifier, owned).await;
+            // A mixed release fleet must dispatch with each host's executable
+            // registry; sharing the driver's registry would mask rollout bugs.
+            let dispatchers = hosts
+                .iter()
+                .zip(owned.iter())
+                .map(|(host, handles)| (host.application().registry(), handles.clone()))
+                .collect();
+            let (round_trip, servers) = start_peer_servers(verifier, dispatchers).await;
             let client = CellClient::peer(
                 Arc::clone(&registry),
                 Arc::clone(&signer),
                 principal.clone(),
                 Arc::clone(&round_trip),
             );
-            let peer = EffectPeerClient::new(signer, principal, round_trip);
-            (client, peer, servers)
+            let peer = EffectPeerClient::new(signer, principal, Arc::clone(&round_trip));
+            (client, peer, servers, Some(round_trip))
         };
-        let typed = ApplicationHandle::new(client.clone(), application, tenant, application_id)
+        let binding_node = usize::from(successor.is_some());
+        let typed = hosts[binding_node]
+            .application_handle::<ReferenceApplication>(client.clone(), tenant, application_id)
+            .unwrap()
             .with_blob_artifact_store(BlobArtifactStore::new(store));
         let sql_target = CellTarget::new(
             tenant,
@@ -250,7 +339,12 @@ impl PerfFixture {
         .unwrap();
         Self {
             _directory: directory,
-            runtimes,
+            nodes: hosts,
+            layout: Some(layout),
+            leases,
+            round_trip,
+            owned_handles: owned,
+            durability,
             typed,
             registry,
             client,
@@ -263,6 +357,11 @@ impl PerfFixture {
 
     pub(super) fn cron_peer(&self) -> EffectPeerClient {
         self.peer.clone()
+    }
+
+    pub(super) fn lose_owner(&self, node: usize) {
+        self.leases[node].fence();
+        self.servers[node].abort();
     }
 
     pub(super) fn from_processes(
@@ -302,6 +401,7 @@ impl PerfFixture {
         );
         let peer = EffectPeerClient::new(signer, principal, round_trip);
         let typed = ApplicationHandle::new(client.clone(), application, tenant, application_id)
+            .unwrap()
             .with_blob_artifact_store(BlobArtifactStore::new(store));
         let sql_target = CellTarget::new(
             tenant,
@@ -319,7 +419,12 @@ impl PerfFixture {
         .unwrap();
         Self {
             _directory: directory,
-            runtimes: Vec::new(),
+            nodes: Vec::new(),
+            layout: None,
+            leases: Vec::new(),
+            round_trip: None,
+            owned_handles: Vec::new(),
+            durability: Vec::new(),
             typed,
             registry,
             client,
@@ -334,8 +439,14 @@ impl PerfFixture {
         for server in &self.servers {
             server.abort();
         }
-        for runtime in &self.runtimes {
-            runtime.shutdown().await.unwrap();
+        for (index, node) in self.nodes.iter().enumerate() {
+            match node.shutdown().await {
+                Ok(()) => {}
+                // The simulated lost owner closes locally but cannot release
+                // authority after its lease is fenced.
+                Err(Error::Fenced) if self.leases[index].check().is_err() => {}
+                Err(error) => panic!("CellNode shutdown failed: {error}"),
+            }
         }
     }
 }
@@ -400,4 +511,21 @@ impl PeerRoundTrip for Loopback {
             dispatcher.dispatch_bytes(&verified, now_ms()).await
         })
     }
+}
+
+// One explicit provider path for the public-host and process qualification lanes.
+pub(super) fn rustfs_store() -> Store {
+    let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    cellule_store::build_explicit_store(
+        &required("CELLULE_TEST_BUCKET"),
+        cellule_store::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CELLULE_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap()
 }

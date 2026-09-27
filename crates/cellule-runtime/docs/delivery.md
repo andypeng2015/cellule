@@ -16,23 +16,23 @@ Each layer has one owner and one primary evidence surface.
 
 | Boundary | Primary source | Evidence |
 | --- | --- | --- |
-| Identity and Cell derivation | `src/identity.rs` | `tests/catalog.rs`, identity unit tests |
-| Control CAS and transitions | `src/authority.rs`, `src/control.rs` | authority and actor tests |
-| SQLite command ledger | `src/executor.rs`, `src/schema.rs` | `tests/actor.rs`, `tests/migration.rs` |
-| Fixed SQL workers | `src/worker.rs` | `tests/workers.rs` |
-| Publication and exact-root recovery | `src/publication.rs`, `cellule-ltx` | `tests/publication.rs`, `cellule-ltx/tests/cell_roots.rs` |
-| Catalog | `src/catalog.rs` | `tests/catalog.rs` |
-| Registry and codecs | `src/registry.rs`, `src/codec.rs` | `tests/registry.rs`, `tests/codec.rs` |
-| Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/client.rs`, peer unit tests |
-| SQL, KV, Blob, Queue, Cron, Workflow | `src/sql.rs`, `src/kv.rs`, `src/blob.rs`, `src/queue.rs`, `src/cron.rs`, `src/workflow.rs` | matching integration tests |
-| Effects and activities | `src/effects.rs`, `src/activity_pool.rs` | `tests/effects.rs`, workflow tests |
-| Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
-| Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
-| Backup pins | `src/backup.rs`, `cellule-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
-| Immutable retention | `src/retention.rs`, `cellule-store::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
-| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
-| State-observing streams | `src/client.rs`; the embedding service's state stream | `tests/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
-| Product composition | The embedding service's routing and lifecycle code | server route, restore, and lifecycle tests |
+| Identity and Cell derivation | `src/identity.rs` | `src/identity.rs` tests, `tests/contracts/application.rs`, `tests/runtime/catalog.rs` |
+| Control CAS and transitions | `src/control.rs`, `src/control/authority.rs` | authority and actor tests |
+| SQLite command ledger | `src/cell/executor.rs`, `src/cell/schema.rs` | `tests/runtime/lifecycle.rs`, `tests/runtime/migration.rs` |
+| Fixed SQL workers | `src/cell/worker.rs` | `tests/runtime/workers.rs` |
+| Publication and exact-root recovery | `src/publication.rs`, `cellule-ltx` | `tests/runtime/publication.rs`, `cellule-ltx/tests/cell/roots.rs` |
+| Catalog | `src/cell/catalog.rs` | `tests/runtime/catalog.rs` |
+| Registry and codecs | `src/registry/`, `src/codec.rs` | `tests/contracts/registry.rs`, `tests/contracts/codec.rs` |
+| Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/protocol/client.rs`, peer unit tests |
+| SQL, KV, Blob, Queue, Cron, Workflow | `src/primitives/sql.rs`, `src/primitives/kv.rs`, `src/primitives/blob.rs`, `src/primitives/queue.rs`, `src/primitives/cron.rs`, `src/primitives/workflow.rs` | matching integration tests |
+| Effects and activities | `src/primitives/effects.rs`, `src/primitives/activity_pool.rs` | `src/primitives/effects/tests.rs`, `src/primitives/activity_pool/tests.rs`, `tests/primitives/workflow.rs` |
+| Scheduler | `src/fleet/scheduler.rs`, `src/primitives/maintenance.rs` | `tests/runtime/scheduler.rs` |
+| Release control | `src/recovery/release.rs`, `src/recovery/release_progress.rs` | release unit tests and server command tests |
+| Backup pins | `src/recovery/backup.rs`, `cellule-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
+| Immutable retention | `src/recovery/retention.rs`, `cellule-store::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
+| Follower mechanics | `src/follower.rs`, `src/node/log.rs`, `src/node/log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
+| State-observing streams | `src/client.rs`; `crab-http-server/src/state_stream.rs` | `tests/protocol/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
+| Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Celld-style follower durability is connected to product command and schema-
 migration response release. A response may be released by either an exact
@@ -67,22 +67,22 @@ This script validates contracts. It does not prove runtime behavior.
 Set a worktree-specific external Cargo target directory before every Rust command.
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-b347 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347 \
   cargo test -p cellule-runtime
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-b347 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347 \
   cargo test -p cellule-ltx --features replica
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-b347 \
-  cargo test -p cellule-app
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347 \
+  cargo test -p crab-http-server
 ```
 
 Run Clippy for all changed crates:
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-b347-clippy \
-  cargo clippy -p cellule-ltx -p cellule-runtime -p cellule-app -p cellule-host \
-  --all-targets -- -D warnings
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
+  cargo clippy -p cellule-ltx -p cellule-runtime \
+  -p crab-http-server --all-targets -- -D warnings
 ```
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
@@ -120,7 +120,7 @@ draining or a supervised task fails before the run completes.
 The raw four-process receipt is validated first with the fail-closed v6 command:
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p cellule-runtime --bin qualification_receipt --locked -- \
   verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
     scale-v1.json "$QUALIFICATION_SIGNER"
@@ -152,7 +152,7 @@ each protected matrix directory, verify one profile-bound matrix in a fresh
 process:
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p cellule-runtime --bin qualification_receipt --locked -- \
   verify-matrix \
   protected/qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
@@ -184,21 +184,25 @@ Fault profiles additionally require a named injected fault, a non-`none` fault
 schedule digest, and a monotonic ownership transition; a signed no-op receipt
 cannot stand in for Kubernetes fault evidence.
 
+The inventory check below uses an in-memory store. The following source-loss,
+retention, and public-host checks use the configured RustFS endpoint. Confirm
+each selected command reports a nonzero passed-test count; Cargo accepts an
+exact filter that matches no tests. The architecture workflow enforces this
+check for every invocation in its RustFS recovery step.
+
 ```bash
-AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-rustfs \
-  cargo test -p cellule-ltx --features replica --test cell_roots \
-  exact_root_inventory_verifies_every_remote_dependency --locked -- --exact
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p cellule-ltx --features replica --test cell --locked \
+  cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CELLULE_TEST_BUCKET="$BUCKET" \
 CELLULE_TEST_ENDPOINT="$ENDPOINT" \
 CELLULE_TEST_PREFIX="$UNIQUE_PREFIX" \
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-rustfs \
-  cargo test -p cellule-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p cellule-runtime --test runtime \
+  runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -206,9 +210,9 @@ AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CELLULE_TEST_BUCKET="$BUCKET" \
 CELLULE_TEST_ENDPOINT="$ENDPOINT" \
 CELLULE_TEST_PREFIX="$UNIQUE_PREFIX-mixed" \
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-rustfs \
-  cargo test -p cellule-runtime --test actor \
-  rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p cellule-runtime --test runtime \
+  runtime::lifecycle::idle::churn::rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -216,23 +220,49 @@ AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CELLULE_TEST_BUCKET="$BUCKET" \
 CELLULE_TEST_ENDPOINT="$ENDPOINT" \
 CELLULE_TEST_PREFIX="$UNIQUE_PREFIX-retention" \
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-rustfs \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p cellule-runtime --lib \
-  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+AWS_ENDPOINT_URL_S3="$ENDPOINT" AWS_ALLOW_HTTP=true \
+AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+QUALIFICATION_BUCKET="$BUCKET" QUALIFICATION_PREFIX="qualification/http-receive-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::receive_fault_tests::receive_faults_rustfs \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_HTTP_CELL_TEST_PREFIX="http-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+AWS_ENDPOINT_URL_S3="$ENDPOINT" AWS_ALLOW_HTTP=true \
+AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+QUALIFICATION_BUCKET="$BUCKET" QUALIFICATION_PREFIX="qualification/http-push-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::receive_tests::native_http_push_rustfs \
   --locked -- --ignored --exact
 ```
-
-The HTTP receive, peer collaboration, and native push provider tests that
-exercise those paths belong to the embedding service; Cellule's provider
-evidence stops at the runtime and LTX commands above.
 
 The coordination simulator has a deterministic seed replay entry point in the
 normal runtime test binary. It never starts I/O or Tokio work:
 
 ```bash
 CELLULE_COORDINATION_SEED=41 CELLULE_COORDINATION_STEPS=256 \
-  CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
-  cargo test -p cellule-runtime coordination_sim::replay_requested_seed_from_environment \
+  CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo test -p cellule-runtime --lib coordination::sim::replay_requested_seed_from_environment \
   --locked -- --exact --nocapture
 ```
 
@@ -255,21 +285,24 @@ flowchart LR
 
 Required cases are:
 
-| Case | Expected proof |
-| --- | --- |
-| Replay | Same request ID and digest returns stored outcome without rerunning handler |
-| Identity conflict | Same request ID with different digest is a durable rejection |
-| Caller cancellation | Accepted command still publishes and later resolves |
-| Lost CAS response | Exact successor is adopted; a different winner fences |
-| Source loss | Successor restores exact database and outcome from object storage |
-| Recovery state | Exact-root activation CASes `Recovering` to `Serving` before returning a handle |
-| Timeout | Admission closes; tentative local state never publishes |
-| Panic | Affected Cell fences; worker thread remains usable |
-| Drain | Accepted commands publish before SQLite close and authority release |
+| Case | Expected proof | Proven by |
+| --- | --- | --- |
+| Replay | Same request ID and digest returns stored outcome without rerunning handler | `runtime::publication::lost_publication_response_reconciles_without_replaying_sql` |
+| Identity conflict | Same request ID with different digest is a durable rejection | `runtime::lifecycle::execution::resolve_distinguishes_committed_absent_conflict_and_expired` |
+| Caller cancellation | Accepted command still publishes and later resolves | `runtime::workers::cancelled_waiter_does_not_cancel_an_accepted_sql_command` |
+| Lost CAS response | Exact successor is adopted; a different winner fences | `runtime::lifecycle::ownership::lost_release_response_is_reconciled_before_successor_acquire` |
+| Source loss | Successor restores exact database and outcome from object storage | `runtime::lifecycle::ownership::crashed_process_is_fenced_before_successor_restore` |
+| Recovery state | Exact-root activation CASes `Recovering` to `Serving` before returning a handle | `runtime::lifecycle::ownership::takeover_resumes_pinned_recovery_before_serving` |
+| Timeout | Admission closes; tentative local state never publishes | `runtime::lifecycle::execution::native_handler_deadline_discards_late_commit_and_reopens_authoritative_root`, `runtime::lifecycle::execution::sqlite_query_is_interrupted_at_wall_deadline` |
+| Panic | Affected Cell fences; worker thread remains usable | `runtime::workers::panicking_handler_fences_only_its_cell_and_worker_continues` |
+| Drain | Accepted commands publish before SQLite close and authority release | `runtime::lifecycle::execution::runtime_shutdown_drains_accepted_work_and_releases_all_owners` |
+
+Every filter above selects exactly one case in the `runtime` suite; run it with
+`cargo test -p cellule-runtime --features test-support --test runtime <filter> --locked`.
 
 Mock-only tests do not satisfy source-loss or publication proof.
 
-`tests/publication.rs` injects the ambiguous publication window at the object
+`tests/runtime/publication.rs` injects the ambiguous publication window at the object
 store boundary: the backend accepts the control `Update`, then the decorator
 returns a connection-reset error. The publisher must reload the exact root,
 clear the retained cut, and return the recorded outcome without invoking the
@@ -309,42 +342,52 @@ prefix, observe identical summaries, inspect unowned `Idle` authority, and use
 a separate process configured only for the destination prefix to verify the
 complete graph with the pinned release.
 
-The ignored qualification tests require one fresh bucket and a unique Cell prefix:
+The RustFS qualification tests require one fresh bucket and a unique Cell prefix.
+The first command is the in-memory inventory check. Each command must report
+at least one passed test:
 
 ```bash
-cargo test -p cellule-ltx --features replica --test cell_roots \
-  exact_root_inventory_verifies_every_remote_dependency -- --exact
+cargo test -p cellule-ltx --features replica --test cell \
+  cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 CELLULE_TEST_BUCKET="$BUCKET" \
 CELLULE_TEST_ENDPOINT="$ENDPOINT" \
 CELLULE_TEST_PREFIX="$UNIQUE_PREFIX" \
-cargo test -p cellule-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+cargo test -p cellule-runtime --test runtime \
+  runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
 
-cargo test -p cellule-app --test reference_application \
-  typed_application_executes_every_primitive_through_a_local_router \
-  -- --exact --nocapture
+CELLULE_TEST_BUCKET="$BUCKET" \
+CELLULE_TEST_ENDPOINT="$ENDPOINT" \
+CELLULE_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --test public_cell_qualification \
+  rustfs_public_cell_node_runs_typed_primitive_workload \
+  -- --ignored --exact --nocapture
 
 CELLULE_TEST_BUCKET="$BUCKET" \
 CELLULE_TEST_ENDPOINT="$ENDPOINT" \
 CELLULE_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p cellule-runtime --lib \
-  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
   -- --ignored --exact
 
+CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_HTTP_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --lib \
+  server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+  -- --ignored --exact --nocapture
 ```
 
 The Cell test publishes a command on one session, removes its local database,
 takes over from a second session, resolves the original request from the exact
-root, and publishes the next sequence. The reference-application test drives
-SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects through the typed
-`CellNode` application handle. The embedding service repeats that workload
-against a real provider over its own HTTP and peer endpoints; those product
-tests belong to it, and all of this remains iteration evidence until the
+root, and publishes the next sequence. The public-host test drives SQL, KV,
+Blob, Queue, Cron, Workflow, Activity, and Effects through the typed
+`CellNode` application handle against the same real provider. CI runs these
+tests against a pinned RustFS image; they remain iteration evidence until the
 protected provider, Kubernetes, and scale matrix receipts pass.
 
-The same CI job also runs the embedding service through public HTTP and private
+The same CI job also runs `crab-http-server` through public HTTP and private
 mTLS forwarding to a heartbeat-renewed remote owner. Native Git creates main
 and feature commits; public APIs then publish an issue, comment, label, status,
 check run, pull request and comment, release and Git tag, and branch protection
@@ -412,7 +455,7 @@ eligibility.
 The contract test surface is:
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-qualification-receipts \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-qualification-receipts \
   cargo test -p cellule-runtime qualification --lib --locked
 ```
 
@@ -442,7 +485,7 @@ Also prove output, row, payload, attempt, lease, and retention bounds.
 
 ## Prove product integration
 
-the embedding service must show a user action, a real durable side effect, and a visible result.
+`crab-http-server` must show a user action, a real durable side effect, and a visible result.
 
 The repository path needs these cases:
 
@@ -517,11 +560,11 @@ also binds that limit to the Pod's `emptyDir.sizeLimit`; current filesystem
 free space remains a separate admission input.
 
 ```bash
-kubectl --namespace cellule exec POD -- \
-  the embedding service --config /etc/cellule/http-server/server.toml \
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
   cells capacity --json --live > capacity-before.json
-kubectl --namespace cellule exec POD -- \
-  the embedding service --config /etc/cellule/http-server/server.toml \
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
   cells metrics > metrics-before.prom
 ```
 
@@ -551,10 +594,20 @@ before and after load.
 {"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}
 ```
 
-The load generator, its request set, its header file, and the response artifact
-belong to the embedding service. It must drive the same aggregate request rate
-through each ready Pod and retain the per-Pod receipts, latency percentiles,
-success and admission counts, and capacity envelopes described above.
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
+  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
+  --base-url https://git.example.com \
+  --target 'refs=4@/api/repos/team/project/refs' \
+  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
+  --mutation 'issues=16@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --aggregate-requests-per-second 1000 \
+  --duration-seconds 300 \
+  --warmup-seconds 15 \
+  --header-file /secure/load-headers \
+  > http-load.json
+```
 
 The harness fully consumes each body and reports the method, 2xx responses, admission
 rejections, unexpected responses, transport/body-limit failures, bytes,

@@ -1,26 +1,33 @@
 # Understand the embedded Cell runtime
 
-Cellule partitions application state into SQLite **Cells**. A Cell has one active writer, publishes immutable Log Transaction (LTX) data to object storage, and can reopen on another Cellule node. Application code stays in Rust and is compiled into the embedding service.
+Crab stores each repository's collaboration state in one SQLite **Cell**. A Cell has one active writer, publishes immutable Log Transaction (LTX) data to object storage, and can reopen on another Crab node. Product code stays in Rust and is compiled into `crab-http-server`.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | Conceptual landing page |
-| Audience | Cellule contributors and fleet operators |
+| Audience | Crab contributors and fleet operators |
 | Goal | Explain the runtime boundary, request path, durability point, and reading order |
 | Status | Implemented, with production capacity and multi-Pod fault qualification still required |
 
 ## See the system in one diagram
 
-The embedding service owns authentication, routing, and authorization policy. The runtime owns deterministic execution, SQLite state, publication, and takeover.
+The public HTTP server owns authentication and repository policy. The runtime owns deterministic execution, SQLite state, publication, and takeover.
 
-![Cellule Cell runtime request, ownership, execution, and storage architecture](diagram/system-architecture.svg)
+![Crab Cell runtime request, ownership, execution, and storage architecture](diagram/system-architecture.svg)
 
 The direct green route is local execution. The orange route is the single authenticated peer hop when another node owns the Cell. Both converge on the same registry, actor, SQLite, and LTX publication path.
+
+`CellClient::local_runtime` resolves a newly admitted local Cell through its
+catalog and owner record for each call. It serves embedded, single-node routing;
+`CellClient::runtime_with_peer` uses the same local path when this node owns the
+Cell and an authenticated peer round trip when another node owns it. The product
+server supplies the peer transport and owner lookup; neither constructor
+acquires an idle Cell.
 
 The dependency direction follows the same boundary:
 
 ```text
-cellule-store <- cellule-ltx <- cellule-runtime <- the embedding service
+cellule-store <- cellule-ltx <- cellule-runtime <- crab-http-server
 ```
 
 Lower crates never import HTTP, Git, repository authorization, or provider configuration.
@@ -61,9 +68,9 @@ Each Cell combines runtime metadata and one application schema in the same SQLit
 | --- | --- | --- |
 | Runtime | Request outcomes, effects, inbox, sequence, due summary | `cellule-runtime` |
 | Application | Repository collaboration rows or one primitive shard | Compiled Rust module |
-| Local cache | SQLite main file, WAL, retained LTX, sparse pages | Current Cellule node |
+| Local cache | SQLite main file, WAL, retained LTX, sparse pages | Current Crab node |
 | Durable data | Immutable roots, LTX bodies, indexes, control record | Object store |
-| External product data | Git, Xet, LFS, release assets | Existing Cellule subsystems |
+| External product data | Git, Xet, LFS, release assets | Existing Crab subsystems |
 
 One command changes one Cell. Cross-Cell work uses durable effects and idempotent destination inboxes, not distributed SQL transactions.
 
@@ -92,11 +99,17 @@ The runtime applies these rules:
   LTX tails, but the owner's mutable SQLite files remain disposable caches
 - **Bounded work**: commands, results, queues, workers, memory, and disk have explicit limits
 
+An application query can use `QueryContext::database_used_bytes()` to inspect its
+Cell's occupied SQLite pages, including indexes and runtime tables. Reusable
+freelist pages, WAL, and LTX files are excluded. Capacity control must account
+for the latter resources separately. The optional capacity primitive protects
+durable page claims for deferred work; see [runtime.md](runtime.md).
+
 Read [runtime.md](runtime.md) for the actor and failure state machines. Read [storage.md](storage.md) for identity, control, root, and LTX formats.
 
 ## Build applications as native Rust modules
 
-V1 is not a general code-hosting platform. A Cellule contributor registers typed Rust handlers at build time.
+V1 is not a general code-hosting platform. A Crab contributor registers typed Rust handlers at build time.
 
 ```rust,ignore
 impl Command for CreateIssue {
@@ -119,7 +132,7 @@ impl Command for CreateIssue {
 
 Handlers receive bounded transaction capabilities. They don't receive raw storage credentials, database paths, or network access.
 
-The runtime has no JavaScript host, WebAssembly host, dynamic library loader, or public primitive endpoint. Browsers continue to use Cellule's product HTTP API.
+The runtime has no JavaScript host, WebAssembly host, dynamic library loader, or public primitive endpoint. Browsers continue to use Crab's product HTTP API.
 
 Read [rust-api.md](rust-api.md) for module registration, typed commands, queries, activities, and peer routing.
 
@@ -138,16 +151,16 @@ The primitives share the same actor, transaction, publication, recovery, and adm
 
 Read [primitives.md](primitives.md) for schemas, state transitions, limits, and examples.
 
-## Deploy one Cellule server per node
+## Deploy one Crab server per node
 
-Each Kubernetes Pod or virtual machine runs one service process. Every eligible node compiles the same registry and advertises its release, capacity, and scheduler progress.
+Each Kubernetes Pod or virtual machine runs one `crab-http-server` process. Every eligible node compiles the same registry and advertises its release, capacity, and scheduler progress.
 
 ```mermaid
 flowchart TB
     LB[External load balancer]
-    N1[Cellule node A]
-    N2[Cellule node B]
-    N3[Cellule node C]
+    N1[Crab node A]
+    N2[Crab node B]
+    N3[Crab node C]
     Origin[(Shared object-store origin)]
 
     LB --> N1
@@ -166,14 +179,17 @@ Read [deployment.md](deployment.md) for node sizing, release activation, Kuberne
 
 ## Apply the hard cutover contract
 
-Cell data starts empty. Cellule does not import, dual-read, dual-write, or fall back to any retired storage format.
+Cell data starts empty. Crab does not import, dual-read, dual-write, or fall back to the retired native-bucket collaboration format.
 
-The embedding service owns the migration sequence for its own legacy keys and
-catalogs; it must fence every legacy writer and verify that adoption published
-a new empty Cell before enabling traffic, and it must not delete canonical
-application objects as part of that migration.
+The operator performs this sequence:
 
-This rule removes compatibility branches from embedding products.
+1. Stop and fence every legacy writer
+2. Manually delete retired `app/v1` collaboration keys and the old HTTP catalog
+3. Keep canonical Git, Xet, LFS, and release-asset objects
+4. Run repository adoption for each retained Git repository
+5. Verify that adoption published a new empty Cell before enabling traffic
+
+This rule removes compatibility branches from product code. It does not permit deletion of canonical Git objects.
 
 ## Use the documentation by task
 
@@ -183,9 +199,11 @@ This rule removes compatibility branches from embedding products.
 | Understand the actor, publication, timeout, or takeover path | [Runtime execution](runtime.md) |
 | Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
 | Complete canonical LTX scaling and decide standalone replication | [Canonical Cell LTX scaling](canonical-ltx-scaling.md) |
+| Execute owner routing, VFS/LTX, and application scale qualification | [SQLite VFS and LTX scaling plan](vfs-ltx-scale-plan.md) |
+| Prioritize LTX latency and publication-capacity experiments | [LTX performance audit](ltx-performance-audit.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |
 | Implement SQL, KV, Blob, Queue, Cron, Workflow, or effects | [Primitive contracts](primitives.md) |
-| Add a native application feature | [Rust programming model](rust-api.md) |
+| Add a native product feature | [Rust programming model](rust-api.md) |
 | Size or operate a fleet | [Deployment and operations](deployment.md) |
 | Verify implementation coverage and remaining gates | [Delivery and qualification](delivery.md) |
 | Inspect normative schemas or peer messages | [`contracts/`](contracts/) |

@@ -1,8 +1,9 @@
 use super::performance_fixture::{PerfFixture, identity, item_id, now_ms};
-use super::*;
+use crate::*;
 use std::time::{Duration, Instant};
 
-use cellule_runtime::{EffectRunOutcome, MaintenanceTickOutcome, MaintenanceTickRequest};
+use cellule_runtime::primitives::effects::EffectRunOutcome;
+use cellule_runtime::primitives::maintenance::{MaintenanceTickOutcome, MaintenanceTickRequest};
 
 async fn measure<F, Fut>(name: &str, iterations: usize, mut action: F) -> Vec<Duration>
 where
@@ -17,7 +18,13 @@ where
         samples.push(operation_started.elapsed());
     }
     let elapsed = started.elapsed();
+    report_samples(name, &mut samples, elapsed);
+    samples
+}
+
+pub(super) fn report_samples(name: &str, samples: &mut [Duration], elapsed: Duration) {
     samples.sort_unstable();
+    let iterations = samples.len();
     let percentile = |percent: usize| {
         samples[(iterations * percent).div_ceil(100).saturating_sub(1)].as_secs_f64() * 1_000.0
     };
@@ -30,27 +37,13 @@ where
         percentile(99),
         percentile(100),
     );
-    samples
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reference_storefront_smoke() {
-    let fixture = PerfFixture::start(1).await;
-    run_reference_primitive_performance(&fixture, false, "storefront_smoke", 1).await;
-    fixture.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual end-to-end performance run"]
 async fn reference_primitive_end_to_end_performance() {
     let fixture = PerfFixture::start(1).await;
-    run_reference_primitive_performance(
-        &fixture,
-        false,
-        "single_runtime",
-        performance_iterations(),
-    )
-    .await;
+    run_reference_primitive_performance(&fixture, false, "single_runtime").await;
     fixture.shutdown().await;
 }
 
@@ -58,29 +51,19 @@ async fn reference_primitive_end_to_end_performance() {
 #[ignore = "manual three-node end-to-end performance run"]
 async fn reference_three_node_fleet_end_to_end_performance() {
     let fixture = PerfFixture::start(3).await;
-    run_reference_primitive_performance(
-        &fixture,
-        true,
-        "fleet_three_runtime_mixed",
-        performance_iterations(),
-    )
-    .await;
+    run_reference_primitive_performance(&fixture, true, "fleet_three_runtime_mixed").await;
     fixture.shutdown().await;
-}
-
-pub(super) fn performance_iterations() -> usize {
-    std::env::var("CELLULE_PERF_ITERATIONS")
-        .ok()
-        .map(|value| value.parse::<usize>().unwrap())
-        .unwrap_or(30)
 }
 
 pub(super) async fn run_reference_primitive_performance(
     fixture: &PerfFixture,
     concurrent: bool,
     fleet_label: &str,
-    iterations: usize,
 ) {
+    let iterations = std::env::var("CELLULE_PERF_ITERATIONS")
+        .ok()
+        .map(|value| value.parse::<usize>().unwrap())
+        .unwrap_or(30);
     assert!((1..=1_000).contains(&iterations));
     let sql = fixture
         .typed
@@ -90,7 +73,7 @@ pub(super) async fn run_reference_primitive_performance(
     let blob = fixture.typed.blob::<ReferenceBlob>().unwrap();
     let queue = fixture.typed.queue::<ReferenceQueue>().unwrap();
     let workflow = fixture.typed.workflow::<ReferenceWorkflow>().unwrap();
-    let activity = cellule_runtime::ActivitySupervisor::new(
+    let activity = cellule_runtime::primitives::workflow::ActivitySupervisor::new(
         fixture.typed.activities::<ReferenceWorkflow>().unwrap(),
         5_000,
     )
@@ -251,7 +234,7 @@ pub(super) async fn run_reference_primitive_performance(
                 .unwrap();
             assert!(matches!(
                 sent.output,
-                cellule_runtime::QueueSendOutcome::Sent { .. }
+                cellule_runtime::primitives::queue::QueueSendOutcome::Sent { .. }
             ));
             let claimed = queue
                 .claim(
@@ -296,13 +279,16 @@ pub(super) async fn run_reference_primitive_performance(
                 .await
                 .unwrap();
             let run_id = match started.output {
-                cellule_runtime::WorkflowOutcome::Applied { run_id, .. } => run_id,
+                cellule_runtime::primitives::workflow::WorkflowOutcome::Applied {
+                    run_id, ..
+                } => run_id,
                 other => panic!("unexpected Workflow start: {other:?}"),
             };
-            assert!(matches!(
-                activity.run_once(0, None).await.unwrap(),
-                ActivityRunOutcome::Completed { .. }
-            ));
+            let outcome = activity.run_once(0, None).await.unwrap();
+            assert!(
+                matches!(outcome, ActivityRunOutcome::Completed { .. }),
+                "{outcome:?}"
+            );
             let observed = workflow
                 .state(workflow_id, None)
                 .await

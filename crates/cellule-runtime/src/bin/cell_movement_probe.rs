@@ -1,3 +1,16 @@
+// Production panics can abandon accepted work and persistence resources; tests
+// retain assertions while runtime paths propagate typed errors.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::{
     env,
     path::{Path as FilePath, PathBuf},
@@ -7,11 +20,15 @@ use std::{
 
 use cellule_ltx::CellStorageLayout;
 use cellule_ltx::{CellReplica, Limits};
-use cellule_runtime::{
-    ApplicationId, CellAuthority, CellCatalog, CellRuntime, CellTarget, IncarnationId, NamespaceId,
-    Owner, SessionId, SqlWorkerPool, TenantId,
-};
-use cellule_store::{Store, test_support::FilesystemCasStore};
+use cellule_runtime::cell::actor::CellRuntime;
+use cellule_runtime::cell::catalog::CellCatalog;
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::control::Owner;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{ApplicationId, CellTarget, NamespaceId, SessionId, TenantId};
+use cellule_runtime::test_support::FilesystemCasStore;
+use cellule_store::Store;
 use object_store::path::Path;
 
 #[tokio::main]

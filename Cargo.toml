@@ -7,6 +7,7 @@ members = [
     "crates/cellule-runtime",
     "crates/cellule-app",
     "crates/cellule-host",
+    "crates/cellule-peer-http",
 ]
 
 [workspace.package]
@@ -22,6 +23,8 @@ cellule-ltx = { version = "=0.1.0", path = "crates/cellule-ltx", default-feature
 cellule-runtime = { version = "=0.1.0", path = "crates/cellule-runtime", default-features = false }
 cellule-app = { version = "=0.1.0", path = "crates/cellule-app", default-features = false }
 cellule-host = { version = "=0.1.0", path = "crates/cellule-host", default-features = false }
+cellule-peer-http = { version = "=0.1.0", path = "crates/cellule-peer-http", default-features = false }
+uuid = { version = "=1.24.0", features = ["v7", "serde"] }
 async-trait = "0.1"
 blake3 = "1.8"
 bytes = "1.11"

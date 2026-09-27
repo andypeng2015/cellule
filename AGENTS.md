@@ -4,7 +4,7 @@ Read the nearest crate `AGENTS.md` before changing that crate. This workspace is
 
 ## Layers
 
-`cellule-types → cellule-store → cellule-ltx → cellule-runtime → cellule-app → cellule-host`. Higher layers may use lower layers; `cellule-host` also uses `cellule-runtime` directly. Keep storage transport separate from authority and application policy. `scripts/check-boundaries.py` checks workspace dependencies and the pure coordination kernel.
+`cellule-types → cellule-store → cellule-ltx → cellule-runtime → cellule-app → cellule-host`. Higher layers may use lower layers; `cellule-host` also uses `cellule-runtime` directly. The optional `cellule-peer-http` adapter depends only on `cellule-runtime`; applications still own HTTP endpoints and authorization. Keep storage transport separate from authority and application policy. `scripts/check-boundaries.py` checks workspace dependencies and the pure coordination kernel.
 
 ## Contracts
 
@@ -18,4 +18,29 @@ Read the nearest crate `AGENTS.md` before changing that crate. This workspace is
 
 Search callers, callees, sibling implementations, tests, and documentation before changing an API. Keep one canonical path; avoid speculative configuration and compatibility shims. Preserve source errors. Do not use `unwrap`, `expect`, or `panic!` outside tests. Keep comments near non-obvious ownership and ordering invariants. Update documentation and runnable examples with behavior changes.
 
-Run `cargo fmt --all`, focused tests, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked`, `python3 scripts/check-boundaries.py`, and `node crates/cellule-runtime/docs/validate.mjs` as applicable. Qualification profiles and expected evidence must never be edited merely to silence a failure. Cloud and process fault tests need their documented isolated environment. Build artifacts belong in a target directory unique to the checkout; on CrabBuild workstations use the mounted Workspace volume.
+Verification routes:
+
+| Check | Command |
+| --- | --- |
+| Format | `cargo fmt --all --check` |
+| Features and targets | `cargo check --workspace --all-targets --all-features --locked` |
+| Tests | `cargo test --workspace --all-features --locked` |
+| Local LTX | `cargo test -p cellule-ltx --no-default-features --locked` |
+| Lints | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
+| API docs | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked` |
+| Boundaries/layout | `python3 scripts/check-boundaries.py` and `python3 scripts/check-cell-ltx-layout.py` |
+| Document syntax | `python3 scripts/check-doc-rust-fences.py` |
+| SQL/peer contracts | `node crates/cellule-runtime/docs/validate.mjs` |
+| Crab parity | `python3 scripts/check-crab-sync.py --crab-source /path/to/Crab` |
+
+Never weaken qualification profiles or expected evidence to silence a failure.
+Use CI or an isolated verification snapshot for broad suites and process tests.
+Cloud and fault tests require their documented environment. On Crab workstations,
+set `CARGO_TARGET_DIR` beneath the mounted `$HOME/Workspace/crabbuild-target`,
+with one directory per checkout.
+
+Keep the main documentation scannable: short explanations, contract tables,
+diagrams, and valid Rust examples. The packaged application guide has a doctest;
+all Rust fences pass the syntax gate. Keep intentional source adaptations in
+`scripts/crab-adaptations.patch` small and reviewable; never regenerate it to
+hide unexplained drift.

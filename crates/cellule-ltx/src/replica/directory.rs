@@ -2,12 +2,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{CellObjectKind, CellStorageLayout, Host, LtxError, Result};
 
+mod checksums;
 mod initial;
+mod relocate;
 mod update;
 
+pub(super) use checksums::load_checksums;
 pub(super) use initial::{
     build_and_upload as build_initial_and_upload, entries as initial_entries,
 };
+pub(super) use relocate::run as relocate_and_upload;
 
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
@@ -535,163 +539,6 @@ pub(super) async fn lookup_spans(
     Ok(spans)
 }
 
-pub(super) async fn load_checksums(
-    verification: Verification<'_>,
-    root: [u8; 32],
-    height: u32,
-    destination: &std::path::Path,
-    limits: crate::Limits,
-) -> Result<crate::pages::PageChecksums> {
-    if height > 3 || verification.database_pages == 0 {
-        return Err(LtxError::LTXCorrupted);
-    }
-    let checksum_path = checksum_path(destination);
-    if verification.host.filesystem.exists(destination)?
-        || verification.host.filesystem.exists(&checksum_path)?
-    {
-        return Err(LtxError::InvalidState(
-            "writable activation destination already exists",
-        ));
-    }
-    if u64::from(verification.database_pages) * 8 > limits.max_database_bytes {
-        return Err(LtxError::Limit("checksum file bytes"));
-    }
-
-    let mut file = verification.host.filesystem.create(&checksum_path)?;
-    let result = async {
-        let mut pending = vec![(root, height, None)];
-        let mut previous_page = 0u32;
-        let mut seen = 0u64;
-        let mut checksum = crate::CHECKSUM_FLAG;
-        let mut output = Vec::with_capacity(64 << 10);
-        while let Some((digest, remaining, expected)) = pending.pop() {
-            let bytes = read_node(&verification, digest).await?;
-            let header = Header::parse(&bytes)?;
-            if (remaining == 0) != (header.kind == 0) {
-                return Err(LtxError::LTXCorrupted);
-            }
-            if header.kind == 0 {
-                let (aggregate, entries) = verify_leaf(
-                    &bytes,
-                    &header,
-                    verification.page_size,
-                    verification.database_pages,
-                    verification.extents,
-                )?;
-                if expected.is_some_and(|value| value != aggregate) {
-                    return Err(LtxError::ChecksumMismatch);
-                }
-                for entry in entries {
-                    let expected_page =
-                        previous_page.checked_add(1).ok_or(LtxError::LTXCorrupted)?;
-                    let lock = crate::ltx::lock_pgno(verification.page_size);
-                    if expected_page == lock {
-                        append_checksum(file.as_mut(), &mut output, 0)?;
-                        previous_page = lock;
-                    }
-                    if entry.page != previous_page.checked_add(1).ok_or(LtxError::LTXCorrupted)? {
-                        return Err(LtxError::LTXCorrupted);
-                    }
-                    append_checksum(file.as_mut(), &mut output, entry.checksum)?;
-                    checksum = crate::CHECKSUM_FLAG | (checksum ^ entry.checksum);
-                    previous_page = entry.page;
-                    seen += 1;
-                }
-                continue;
-            }
-            let (aggregate, children) = verify_branch(&bytes, &header)?;
-            if expected.is_some_and(|value| value != aggregate) {
-                return Err(LtxError::ChecksumMismatch);
-            }
-            let next = remaining.checked_sub(1).ok_or(LtxError::LTXCorrupted)?;
-            pending.extend(
-                children
-                    .into_iter()
-                    .rev()
-                    .map(|child| (child.digest, next, Some(child.aggregate))),
-            );
-        }
-        let lock = crate::ltx::lock_pgno(verification.page_size);
-        if previous_page < verification.database_pages {
-            if previous_page.checked_add(1).ok_or(LtxError::LTXCorrupted)? != lock
-                || lock != verification.database_pages
-            {
-                return Err(LtxError::LTXCorrupted);
-            }
-            append_checksum(file.as_mut(), &mut output, 0)?;
-        }
-        let expected =
-            u64::from(verification.database_pages) - u64::from(lock <= verification.database_pages);
-        if seen != expected {
-            return Err(LtxError::LTXCorrupted);
-        }
-        if !output.is_empty() {
-            file.write_all(&output)?;
-        }
-        file.sync_all()?;
-        Ok(checksum)
-    }
-    .await;
-    drop(file);
-
-    let checksum = match result {
-        Ok(checksum) => {
-            if let Err(error) = verification.host.filesystem.sync_parent(&checksum_path) {
-                cleanup_checksum_file(verification.host, &checksum_path);
-                return Err(error.into());
-            }
-            checksum
-        }
-        Err(error) => {
-            cleanup_checksum_file(verification.host, &checksum_path);
-            return Err(error);
-        }
-    };
-    crate::pages::PageChecksums::from_file(
-        crate::LtxHost {
-            // The checksum base lives with the active writer. Temporary job
-            // admission must end before that handle is returned.
-            facilities: verification
-                .host
-                .clone()
-                .without_recovery()
-                .without_dirty()
-                .without_scratch(),
-            max_database_bytes: limits.max_database_bytes,
-            max_file_bytes: limits.max_database_bytes,
-        },
-        &checksum_path,
-        verification.page_size,
-        verification.database_pages,
-        checksum,
-    )
-}
-
-fn append_checksum(
-    file: &mut dyn crate::environment::FileIo,
-    output: &mut Vec<u8>,
-    checksum: u64,
-) -> Result<()> {
-    output.extend_from_slice(&checksum.to_be_bytes());
-    if output.len() >= 64 << 10 {
-        file.write_all(output)?;
-        output.clear();
-    }
-    Ok(())
-}
-
-fn checksum_path(destination: &std::path::Path) -> std::path::PathBuf {
-    let mut path = destination.as_os_str().to_owned();
-    path.push(".cellule-ltx-checksums");
-    path.into()
-}
-
-fn cleanup_checksum_file(host: &Host, path: &std::path::Path) {
-    if host.filesystem.remove_file(path).is_ok() {
-        let _ = host.filesystem.sync_parent(path);
-    }
-}
-
 async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Arc<[u8]>> {
     let path = verification.layout.incarnation_object_path(
         verification.cell,
@@ -737,7 +584,7 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
             .directory_cache_invalidate(persistent_key.clone())
             .await;
     }
-    let _permit = verification.host.io_permit().await?;
+    let permit = verification.host.io_permit().await?;
     let result = verification
         .layout
         .store()
@@ -752,10 +599,12 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(LtxError::ChecksumMismatch);
     }
+    // Verified bytes no longer need origin admission. Cache fills admit their
+    // own bounded job without queuing, so slow disk cannot occupy network slots.
+    drop(permit);
     let _ = verification
         .host
-        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)
-        .await;
+        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES);
     let bytes: Arc<[u8]> = bytes.to_vec().into();
     super::cache::insert(
         verification.layout,
@@ -1002,246 +851,45 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| LtxError::LTXCorrupted)
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use cellule_store::Store;
-    use object_store::{
-        memory::InMemory,
-        path::Path,
-        throttle::{ThrottleConfig, ThrottledStore},
-    };
-
-    use super::*;
-
-    #[test]
-    fn radix_tree_round_trips_multi_level_aggregates() {
-        let entries = (1..=70_000)
-            .map(|page| {
-                (
-                    page,
-                    DirectoryEntry {
-                        page,
-                        object: [1; 32],
-                        offset: u64::from(page) * 100,
-                        length: 100,
-                        frame_hash: [2; 32],
-                        checksum: u64::from(page) | crate::CHECKSUM_FLAG,
-                    },
-                )
-            })
-            .collect();
-        let tree = DirectoryTree::build(entries, 4096, 70_000).unwrap();
-        assert_eq!(tree.height(), 2);
-        assert_eq!(tree.root.aggregate.live_pages, 70_000);
-        assert!(tree.objects.len() > 256);
+/// Shape-checks one encoded directory node without a root graph.
+///
+/// Authentication needs the exact root's object extents, which this entry point
+/// does not have: a leaf is checked against extents derived from its own
+/// records, so every structural rule still runs while extent membership and the
+/// lock-page rule stay unverified. Audit tooling that must authenticate a node
+/// walks the root graph instead.
+pub(crate) fn inspect_node(bytes: &[u8]) -> Result<()> {
+    let header = Header::parse(bytes)?;
+    if header.kind == 1 {
+        verify_branch(bytes, &header)?;
+        return Ok(());
     }
-
-    #[tokio::test(start_paused = true)]
-    async fn streamed_tree_matches_canonical_root_without_retaining_objects() {
-        let entries = (1..=70_000)
-            .map(|page| DirectoryEntry {
-                page,
-                object: [1; 32],
-                offset: u64::from(page) * 100,
-                length: 100,
-                frame_hash: [2; 32],
-                checksum: u64::from(page) | crate::CHECKSUM_FLAG,
+    let mut extents: BTreeMap<[u8; 32], ObjectExtent> = BTreeMap::new();
+    let mut database_pages = 0_u32;
+    for index in 0..header.entries as usize {
+        let start = HEADER_BYTES + index * LEAF_RECORD_BYTES;
+        let page = read_u32(bytes, start)?;
+        let object = array(&bytes[start + 4..start + 36])?;
+        let offset = read_u64(bytes, start + 36)?;
+        let length = read_u32(bytes, start + 44)?;
+        let end = offset
+            .checked_add(u64::from(length))
+            .ok_or(LtxError::LTXCorrupted)?;
+        database_pages = database_pages.max(page);
+        extents
+            .entry(object)
+            .or_insert_with(|| ObjectExtent {
+                kind: crate::CellObjectKind::Ltx,
+                ranges: Vec::new(),
             })
-            .collect::<Vec<_>>();
-        let canonical = DirectoryTree::build(
-            entries
-                .iter()
-                .cloned()
-                .map(|entry| (entry.page, entry))
-                .collect(),
-            4096,
-            70_000,
-        )
-        .unwrap();
-        let delay = std::time::Duration::from_millis(10);
-        let store = Store::new(Arc::new(ThrottledStore::new(
-            InMemory::new(),
-            ThrottleConfig {
-                wait_put_per_call: delay,
-                ..ThrottleConfig::default()
-            },
-        )));
-        let layout = CellStorageLayout::new(store.clone(), Path::from("streaming"), [3; 16]);
-        let replica =
-            super::super::CellReplica::new(layout, [1; 32], [2; 16], crate::Limits::default())
-                .unwrap();
-        let started = tokio::time::Instant::now();
-        let streamed =
-            build_initial_and_upload(entries.into_iter().map(Ok), 4096, 70_000, &replica)
-                .await
-                .unwrap();
-        let mut level_nodes = 70_000_usize.div_ceil(FANOUT);
-        let mut upload_intervals = 0_usize;
-        loop {
-            upload_intervals += level_nodes.div_ceil(super::super::OBJECT_UPLOAD_CONCURRENCY);
-            if level_nodes == 1 {
-                break;
-            }
-            level_nodes = level_nodes.div_ceil(FANOUT);
-        }
-        assert_eq!(
-            started.elapsed(),
-            delay * u32::try_from(upload_intervals).unwrap()
-        );
-
-        assert_eq!(streamed.root_digest(), canonical.root_digest());
-        assert_eq!(streamed.height(), canonical.height());
-        assert_eq!(streamed.checksum(), canonical.checksum());
-        assert!(streamed.objects().is_empty());
-        assert_eq!(
-            store
-                .list_prefix(&Path::from("streaming/cells/v1"))
-                .await
-                .unwrap()
-                .len(),
-            canonical.objects().len()
-        );
+            .ranges
+            .push(offset..end);
     }
-
-    #[tokio::test]
-    async fn incremental_update_rebuilds_the_last_height_two_branch() {
-        let page_size = 4096;
-        let base_pages = 401_938;
-        let final_pages = 403_220;
-        let lock = crate::ltx::lock_pgno(page_size);
-        let cell = [8; 32];
-        let incarnation = [9; 16];
-        let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(store.clone(), Path::from("update"), incarnation);
-        let replica = super::super::CellReplica::new(
-            layout.clone(),
-            cell,
-            incarnation,
-            crate::Limits::default(),
-        )
-        .unwrap();
-        let entry = |page: u32, object: [u8; 32]| DirectoryEntry {
-            page,
-            object,
-            offset: u64::from(page) * 100,
-            length: 100,
-            frame_hash: [page as u8; 32],
-            checksum: crate::CHECKSUM_FLAG | u64::from(page),
-        };
-        let pages = |end: u32, object| {
-            (1..=end)
-                .filter(|page| *page != lock)
-                .map(|page| (page, entry(page, object)))
-                .collect::<BTreeMap<_, _>>()
-        };
-        let base_entries = pages(base_pages, [1; 32]);
-        let final_entries = pages(final_pages, [1; 32])
-            .into_iter()
-            .map(|(page, mut entry)| {
-                if page <= 2 || page > base_pages {
-                    entry.object = [2; 32];
-                }
-                (page, entry)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let base_tree = DirectoryTree::build(base_entries, page_size, base_pages).unwrap();
-        for object in &base_tree.objects {
-            let path = layout.incarnation_object_path(
-                &cell,
-                &incarnation,
-                &object.digest,
-                CellObjectKind::Directory,
-            );
-            store
-                .put(&path, Bytes::from(object.bytes.clone()))
-                .await
-                .unwrap();
-        }
-        let final_tree =
-            DirectoryTree::build(final_entries.clone(), page_size, final_pages).unwrap();
-        let changes = final_entries
-            .into_iter()
-            .filter(|(page, _)| *page <= 2 || *page > base_pages)
-            .collect::<BTreeMap<_, _>>();
-        let base_extents = BTreeMap::from([(
-            [1; 32],
-            ObjectExtent {
-                kind: CellObjectKind::Ltx,
-                ranges: std::iter::once(0..50_000_000).collect(),
-            },
-        )]);
-        let final_extents = BTreeMap::from([
-            (
-                [1; 32],
-                ObjectExtent {
-                    kind: CellObjectKind::Ltx,
-                    ranges: std::iter::once(0..50_000_000).collect(),
-                },
-            ),
-            (
-                [2; 32],
-                ObjectExtent {
-                    kind: CellObjectKind::Ltx,
-                    ranges: std::iter::once(0..50_000_000).collect(),
-                },
-            ),
-        ]);
-        let updated = DirectoryTree::update(
-            Verification {
-                layout: &layout,
-                cell: &cell,
-                incarnation: &incarnation,
-                page_size,
-                database_pages: base_pages,
-                extents: &base_extents,
-                host: &replica.host,
-                origin: crate::LtxReadOrigin::Cold,
-            },
-            base_tree.root_digest(),
-            base_tree.height(),
-            base_tree.root.aggregate,
-            changes,
-            base_pages,
-            Verification {
-                layout: &layout,
-                cell: &cell,
-                incarnation: &incarnation,
-                page_size,
-                database_pages: final_pages,
-                extents: &final_extents,
-                host: &replica.host,
-                origin: crate::LtxReadOrigin::Cold,
-            },
-            final_tree.checksum(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(updated.root_digest(), final_tree.root_digest());
-        assert_eq!(updated.height(), final_tree.height());
-    }
-
-    #[test]
-    fn radix_tree_rejects_missing_allocated_page() {
-        let entries = [1, 3]
-            .into_iter()
-            .map(|page| {
-                (
-                    page,
-                    DirectoryEntry {
-                        page,
-                        object: [1; 32],
-                        offset: u64::from(page) * 100,
-                        length: 100,
-                        frame_hash: [2; 32],
-                        checksum: u64::from(page) | crate::CHECKSUM_FLAG,
-                    },
-                )
-            })
-            .collect();
-        assert!(DirectoryTree::build(entries, 4096, 3).is_err());
-    }
+    // Page size zero disables the lock-page membership rule: with no root graph
+    // there is no page size to work from, and every other rule still runs.
+    verify_leaf(bytes, &header, 0, database_pages, &extents)?;
+    Ok(())
 }
+
+#[cfg(test)]
+mod tests;

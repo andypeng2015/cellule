@@ -1,3 +1,4 @@
+//! Recovery planning: scratch budgets, verified plans, and materialized plans.
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,14 +14,14 @@ pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Res
         .checked_mul(u64::from(database_pages))
         .and_then(|bytes| bytes.checked_mul(2))
         .and_then(|bytes| bytes.checked_add(HEADROOM))
-        .ok_or(LtxError::Limit("scratch disk bytes"))
+        .ok_or(LtxError::Limit(crate::LimitKind::ScratchDiskBytes))
 }
 
 /// A fully verified, explicit snapshot-plus-deltas plan ending at an exact position.
 ///
 /// Construction reads only named files and owns their exact verified database
 /// image, preventing later path replacement from changing the plan. A remote
-/// manifest's authenticity, Cell identity, epoch, and object selection
+/// manifest's authenticity, repository identity, epoch, and object selection
 /// remain the caller's job.
 pub struct VerifiedPlan {
     pub(crate) infos: Vec<SegmentInfo>,
@@ -50,7 +51,7 @@ struct MaterializationState {
 impl MaterializationState {
     fn apply(&mut self, bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
         if bytes.len() as u64 > limits.max_file_bytes {
-            return Err(LtxError::Limit("LTX bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::LtxBytes));
         }
         if bytes.len() as u64 != info.size_bytes {
             return Err(LtxError::ChecksumMismatch);
@@ -79,7 +80,7 @@ impl MaterializationState {
         let image_len = usize::try_from(header.commit)
             .ok()
             .and_then(|pages| pages.checked_mul(header.page_size as usize))
-            .ok_or(LtxError::Limit("database bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::DatabaseBytes))?;
         self.image.resize(image_len, 0);
         let mut checksums = self.checksums.begin_apply(
             header.page_size,
@@ -91,10 +92,10 @@ impl MaterializationState {
             checksums.page(page.pgno, &self.page)?;
             let offset = (page.pgno as usize - 1)
                 .checked_mul(header.page_size as usize)
-                .ok_or(LtxError::Limit("database bytes"))?;
+                .ok_or(LtxError::Limit(crate::LimitKind::DatabaseBytes))?;
             let end = offset
                 .checked_add(header.page_size as usize)
-                .ok_or(LtxError::Limit("database bytes"))?;
+                .ok_or(LtxError::Limit(crate::LimitKind::DatabaseBytes))?;
             self.image[offset..end].copy_from_slice(&self.page);
         }
         checksums.finish()?;
@@ -122,7 +123,7 @@ impl MaterializationState {
             return Err(LtxError::ChecksumMismatch);
         }
         let database_pages = u32::try_from(self.image.len() / self.page_size as usize)
-            .map_err(|_| LtxError::Limit("database pages"))?;
+            .map_err(|_| LtxError::Limit(crate::LimitKind::DatabasePages))?;
         Ok(MaterializedPlan {
             image: self.image,
             checksums: self.checksums,
@@ -155,7 +156,7 @@ impl VerifiedPlan {
             return Err(LtxError::TxNotAvailable);
         }
         if segments.len() > limits.max_segments {
-            return Err(LtxError::Limit("plan segments"));
+            return Err(LtxError::Limit(crate::LimitKind::PlanSegments));
         }
         let mut infos = Vec::with_capacity(segments.len());
         let mut materialization = MaterializationState::default();
@@ -163,9 +164,9 @@ impl VerifiedPlan {
         for segment in segments {
             total = total
                 .checked_add(segment.info().size_bytes)
-                .ok_or(LtxError::Limit("plan bytes"))?;
+                .ok_or(LtxError::Limit(crate::LimitKind::PlanBytes))?;
             if total > limits.max_plan_bytes || segment.info().size_bytes > limits.max_file_bytes {
-                return Err(LtxError::Limit("plan bytes"));
+                return Err(LtxError::Limit(crate::LimitKind::PlanBytes));
             }
             let bytes = host.read(segment.path(), segment.info().size_bytes)?;
             materialization.apply(&bytes, segment.info(), limits)?;
@@ -179,6 +180,7 @@ impl VerifiedPlan {
         })
     }
 
+    /// Returns the position the recovered database ends at.
     #[must_use]
     pub fn position(&self) -> Position {
         self.materialized.position
@@ -195,21 +197,47 @@ fn validate_header(header: &ltx::Header, limits: Limits) -> Result<()> {
         return Err(LtxError::LTXCorrupted);
     }
     if u64::from(header.commit) * u64::from(header.page_size) > limits.max_database_bytes {
-        return Err(LtxError::Limit("database bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::DatabaseBytes));
     }
     Ok(())
 }
 
-#[cfg_attr(not(feature = "replica"), expect(dead_code))]
+#[cfg(feature = "replica")]
 pub(crate) fn verify_segment(bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
     if bytes.len() as u64 > limits.max_file_bytes {
-        return Err(LtxError::Limit("LTX bytes"));
+        return Err(LtxError::Limit(crate::LimitKind::LtxBytes));
     }
+    // Buffer callers know their exact bytes up front; preserve permanent
+    // length/digest rejection before the decoder can report a short read.
     if bytes.len() as u64 != info.size_bytes || *blake3::hash(bytes).as_bytes() != info.blake3 {
         return Err(LtxError::ChecksumMismatch);
     }
-    validate_header(&ltx::Header::parse(bytes)?, limits)?;
-    if SegmentInfo::from_decoded(bytes, &ltx::decode_file(bytes)?) != *info {
+    verify_segment_reader(bytes, info, limits)
+}
+
+#[cfg(feature = "replica")]
+pub(crate) fn verify_segment_reader(
+    reader: impl Read,
+    info: &SegmentInfo,
+    limits: Limits,
+) -> Result<()> {
+    if info.size_bytes > limits.max_file_bytes {
+        return Err(LtxError::Limit(crate::LimitKind::LtxBytes));
+    }
+    // Read one extra byte to reject trailing data without trusting a stream's
+    // length. Retain page scratch and indexes, not the complete compressed body.
+    let mut decoder = crate::codec::Decoder::new(reader.take(info.size_bytes.saturating_add(1)));
+    decoder.decode_header()?;
+    validate_header(&decoder.header, limits)?;
+    let mut page = vec![0; decoder.header.page_size as usize];
+    while decoder.decode_page(&mut page)?.is_some() {}
+    decoder.close()?;
+    let (size, digest) = decoder.artifact()?;
+    let decoded = ltx::DecodedFile {
+        header: decoder.header,
+        trailer: decoder.trailer,
+    };
+    if SegmentInfo::from_inspected(&decoded, size, digest) != *info {
         return Err(LtxError::ChecksumMismatch);
     }
     Ok(())
@@ -239,7 +267,7 @@ pub(crate) fn compact_to_file(
     let first = plan.infos.first().ok_or(LtxError::TxNotAvailable)?;
     let last = plan.infos.last().ok_or(LtxError::TxNotAvailable)?;
     if plan.infos.len() > plan.limits.max_segments {
-        return Err(LtxError::Limit("compaction inputs"));
+        return Err(LtxError::Limit(crate::LimitKind::CompactionInputs));
     }
     let materialized = plan.materialize();
     if materialized.checksums.checksum() != materialized.position.checksum {
@@ -271,10 +299,10 @@ pub(crate) fn compact_to_file(
         }
         let start = (page as usize - 1)
             .checked_mul(page_size)
-            .ok_or(LtxError::Limit("database bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::DatabaseBytes))?;
         let end = start
             .checked_add(page_size)
-            .ok_or(LtxError::Limit("database bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::DatabaseBytes))?;
         let data = materialized
             .image
             .get(start..end)
@@ -367,7 +395,7 @@ fn digest_reader(mut reader: impl Read) -> Result<(u64, [u8; 32])> {
         }
         size = size
             .checked_add(read as u64)
-            .ok_or(LtxError::Limit("LTX bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::LtxBytes))?;
         digest.update(&buffer[..read]);
     }
     Ok((size, *digest.finalize().as_bytes()))
