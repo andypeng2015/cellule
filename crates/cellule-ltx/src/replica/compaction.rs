@@ -1,16 +1,29 @@
-use std::{cmp::Reverse, collections::BinaryHeap, io, ops::Range, path::Path};
+use std::{
+    io,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use futures_util::{StreamExt as _, stream};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
+use super::merge::LocatorMerge;
 use super::{
     CellReplica, DirectoryEntry, LoadedGraph, PreparedRoot, RootRef, SEGMENT_TRANSFER_CONCURRENCY,
     SegmentDescriptor, directory,
 };
 use crate::{CellObjectKind, LtxError, Result, SegmentInfo, Txid, environment::FileIo};
 
+mod output;
+mod source;
+
 pub(super) mod scratch;
 use scratch::ScratchFiles;
-pub(super) use scratch::{upload, upload_source};
+
+use output::*;
+use scratch::upload;
+pub(super) use scratch::upload_source;
+use source::*;
 
 const INDEX_READ_BYTES: u64 = 60 * 8_192;
 const FRAME_READ_BYTES: u64 = 1 << 20;
@@ -35,33 +48,62 @@ pub(super) async fn prepare(
         return Err(LtxError::InvalidState("invalid compaction level or range"));
     }
 
-    let mut scratch = ScratchFiles::new(&replica.host, scratch_directory);
-    let original_indexes = scratch.create("source-indexes")?;
-    let original_bodies = scratch.create("source-bodies")?;
-    let compacted_ltx = scratch.create("compacted-ltx")?;
-    let codec_index = scratch.create("codec-index")?;
-    let compacted_index = scratch.create("compacted-index")?;
+    let host = replica.host.clone();
+    let directory = scratch_directory.to_owned();
+    let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+    let (cleaned, cleanup) = tokio::sync::oneshot::channel();
+    let result = async {
+        let files = replica
+            .host
+            .run(move || {
+                let mut scratch = ScratchFiles::new(host, &directory, runtime, cleaned);
+                Ok::<_, LtxError>(CompactionFiles {
+                    original_indexes: scratch.create("source-indexes")?,
+                    original_bodies: scratch.create("source-bodies")?,
+                    compacted_ltx: scratch.create("compacted-ltx")?,
+                    codec_index: scratch.create("codec-index")?,
+                    compacted_index: scratch.create("compacted-index")?,
+                    scratch: Arc::new(scratch),
+                })
+            })
+            .await??;
+        prepare_root(replica, base, graph, range, level, files).await
+    }
+    .await;
+    // Ordinary completion includes cleanup. Cancellation leaves cleanup owned
+    // by the last dispatched file job instead of unlinking its inputs early.
+    let _ = cleanup.await;
+    result
+}
+
+struct CompactionFiles {
+    original_indexes: PathBuf,
+    original_bodies: PathBuf,
+    compacted_ltx: PathBuf,
+    codec_index: PathBuf,
+    compacted_index: PathBuf,
+    scratch: Arc<ScratchFiles>,
+}
+
+async fn prepare_root(
+    replica: &CellReplica,
+    base: &RootRef,
+    graph: LoadedGraph,
+    range: Range<usize>,
+    level: u8,
+    files: CompactionFiles,
+) -> Result<PreparedRoot> {
+    let selected = &graph.descriptors[range.clone()];
     // The authenticated streams have separate scratch files. Both must finish
     // before the merge, but neither depends on the other's transfer.
     let (spooled, body_inputs) = futures_util::future::join(
-        spool_indexes(replica, &graph.descriptors, &original_indexes),
-        spool_selected_bodies(replica, selected, &original_bodies),
+        spool_indexes(replica, selected, &files.scratch, &files.original_indexes),
+        spool_selected_bodies(replica, selected, &files.scratch, &files.original_bodies),
     )
     .await;
     let spooled = spooled?;
     let body_inputs = body_inputs?;
-    let selected_inputs = spooled[range.clone()].to_vec();
-    let artifacts = write_compacted(
-        replica,
-        &selected_inputs,
-        &original_indexes,
-        &original_bodies,
-        &body_inputs,
-        &compacted_ltx,
-        &codec_index,
-        &compacted_index,
-    )
-    .await?;
+    let artifacts = write_compacted(replica, spooled, &body_inputs, &files).await?;
 
     let first = selected.first().ok_or(LtxError::TxNotAvailable)?;
     let last = selected.last().ok_or(LtxError::TxNotAvailable)?;
@@ -85,13 +127,17 @@ pub(super) async fn prepare(
     let (body_upload, index_upload) = futures_util::future::join(
         upload(
             replica,
-            &compacted_ltx,
+            &files.scratch,
+            &files.compacted_ltx,
+            artifacts.ltx.length,
             &descriptor.info.blake3,
             CellObjectKind::Ltx,
         ),
         upload(
             replica,
-            &compacted_index,
+            &files.scratch,
+            &files.compacted_index,
+            artifacts.index.length,
             &descriptor.index_digest,
             CellObjectKind::Index,
         ),
@@ -104,29 +150,25 @@ pub(super) async fn prepare(
     descriptors.splice(range.clone(), [descriptor.clone()]);
     replica.validate_chain(&descriptors, base.position)?;
 
-    let compacted_source = replica.host.filesystem.open(&compacted_index)?;
-    let original_source = replica.host.filesystem.open(&original_indexes)?;
-    let mut final_inputs = Vec::with_capacity(descriptors.len());
-    final_inputs.extend(spooled[..range.start].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    final_inputs.push(SpoolInput {
+    let compacted_source = files.scratch.open(&files.compacted_index).await?;
+    let compacted_input = SpoolInput {
         descriptor,
-        source: 0,
         start: 0,
         length: artifacts.index.length,
-    });
-    final_inputs.extend(spooled[range.end..].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    let entries = MergedEntries::new(vec![compacted_source, original_source], final_inputs)?;
+    };
+    let entries =
+        MergedEntries::open(&replica.host, compacted_source, vec![compacted_input]).await?;
     let endpoint = descriptors.last().ok_or(LtxError::LTXCorrupted)?;
     let page_size = endpoint.info.page_size;
     let database_pages = endpoint.info.database_pages;
-    let directory =
-        directory::build_initial_and_upload(entries, page_size, database_pages, replica).await?;
+    let directory = directory::relocate_and_upload(
+        replica,
+        &graph,
+        &descriptors,
+        selected,
+        entries.stream(replica.host.clone()),
+    )
+    .await?;
     replica
         .finish_root(
             Some(base),
@@ -139,440 +181,6 @@ pub(super) async fn prepare(
             directory,
         )
         .await
-}
-
-async fn spool_selected_bodies(
-    replica: &CellReplica,
-    descriptors: &[SegmentDescriptor],
-    destination: &Path,
-) -> Result<Vec<BodySpoolInput>> {
-    let mut planned = Vec::with_capacity(descriptors.len());
-    let mut total_bytes = 0_u64;
-    for descriptor in descriptors {
-        let start = total_bytes;
-        total_bytes = total_bytes
-            .checked_add(descriptor.info.size_bytes)
-            .ok_or(LtxError::Limit("compaction body spool"))?;
-        planned.push((descriptor.clone(), start));
-    }
-
-    let results = stream::iter(
-        planned
-            .into_iter()
-            .map(|(descriptor, output_start)| async move {
-                let mut file = replica.host.filesystem.open_rw(destination)?;
-                let source_start = descriptor.offset();
-                let source_end = source_start
-                    .checked_add(descriptor.info.size_bytes)
-                    .ok_or(LtxError::LTXCorrupted)?;
-                let path = replica.layout.incarnation_object_path(
-                    &replica.cell,
-                    &replica.incarnation,
-                    &descriptor.object_digest(),
-                    descriptor.object_kind(),
-                );
-                let mut source_offset = source_start;
-                let mut hasher = blake3::Hasher::new();
-                while source_offset < source_end {
-                    let next = source_offset
-                        .checked_add((source_end - source_offset).min(FRAME_READ_BYTES))
-                        .ok_or(LtxError::LTXCorrupted)?;
-                    let _permit = replica.host.io_permit().await?;
-                    let bytes = replica
-                        .layout
-                        .store()
-                        .range_get(&path, source_offset..next)
-                        .await?;
-                    drop(_permit);
-                    if bytes.len() as u64 != next - source_offset {
-                        return Err(LtxError::ChecksumMismatch);
-                    }
-                    hasher.update(&bytes);
-                    let output_offset = output_start
-                        .checked_add(source_offset - source_start)
-                        .ok_or(LtxError::Limit("compaction body spool"))?;
-                    file = replica
-                        .host
-                        .run(move || {
-                            file.write_all_at(output_offset, &bytes)?;
-                            Ok::<_, LtxError>(file)
-                        })
-                        .await??;
-                    source_offset = next;
-                }
-                if *hasher.finalize().as_bytes() != descriptor.info.blake3 {
-                    return Err(LtxError::ChecksumMismatch);
-                }
-                Ok(BodySpoolInput {
-                    descriptor,
-                    start: output_start,
-                })
-            }),
-    )
-    .buffered(SEGMENT_TRANSFER_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await;
-    let spooled = results.into_iter().collect::<Result<Vec<_>>>()?;
-    sync_spool(replica, destination, total_bytes).await?;
-    Ok(spooled)
-}
-
-async fn spool_indexes(
-    replica: &CellReplica,
-    descriptors: &[SegmentDescriptor],
-    destination: &Path,
-) -> Result<Vec<SpoolInput>> {
-    let mut planned = Vec::with_capacity(descriptors.len());
-    let mut total_bytes = 0_u64;
-    for descriptor in descriptors {
-        if descriptor.index_length == 0
-            || descriptor.index_length % crate::paged::ENTRY_BYTES as u64 != 0
-        {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let start = total_bytes;
-        total_bytes = total_bytes
-            .checked_add(descriptor.index_length)
-            .ok_or(LtxError::Limit("compaction index spool"))?;
-        planned.push((descriptor.clone(), start));
-    }
-
-    let results = stream::iter(
-        planned
-            .into_iter()
-            .map(|(descriptor, output_start)| async move {
-                let mut file = replica.host.filesystem.open_rw(destination)?;
-                let path = replica.layout.incarnation_object_path(
-                    &replica.cell,
-                    &replica.incarnation,
-                    &descriptor.index_digest,
-                    CellObjectKind::Index,
-                );
-                let mut source_offset = 0_u64;
-                let mut hasher = blake3::Hasher::new();
-                let mut validator = crate::paged::IndexValidator::new(&descriptor.info);
-                while source_offset < descriptor.index_length {
-                    let length = (descriptor.index_length - source_offset).min(INDEX_READ_BYTES);
-                    let _permit = replica.host.io_permit().await?;
-                    let bytes = replica
-                        .layout
-                        .store()
-                        .range_get(&path, source_offset..source_offset + length)
-                        .await?;
-                    drop(_permit);
-                    if bytes.len() as u64 != length {
-                        return Err(LtxError::ChecksumMismatch);
-                    }
-                    hasher.update(&bytes);
-                    let output_offset = output_start
-                        .checked_add(source_offset)
-                        .ok_or(LtxError::Limit("compaction index spool"))?;
-                    let returned = replica
-                        .host
-                        .run(move || {
-                            for entry in bytes.as_chunks::<{ crate::paged::ENTRY_BYTES }>().0 {
-                                validator.validate(crate::paged::decode_index_entry(entry)?)?;
-                            }
-                            file.write_all_at(output_offset, &bytes)?;
-                            Ok::<_, LtxError>((file, validator))
-                        })
-                        .await??;
-                    file = returned.0;
-                    validator = returned.1;
-                    source_offset += length;
-                }
-                if *hasher.finalize().as_bytes() != descriptor.index_digest {
-                    return Err(LtxError::ChecksumMismatch);
-                }
-                let length = descriptor.index_length;
-                Ok(SpoolInput {
-                    descriptor,
-                    source: 0,
-                    start: output_start,
-                    length,
-                })
-            }),
-    )
-    .buffered(SEGMENT_TRANSFER_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await;
-    let inputs = results.into_iter().collect::<Result<Vec<_>>>()?;
-    sync_spool(replica, destination, total_bytes).await?;
-    Ok(inputs)
-}
-
-async fn sync_spool(replica: &CellReplica, path: &Path, expected_bytes: u64) -> Result<()> {
-    let mut file = replica.host.filesystem.open_rw(path)?;
-    replica
-        .host
-        .run(move || {
-            if file.file_len()? != expected_bytes {
-                return Err(LtxError::LTXCorrupted);
-            }
-            file.sync_all()?;
-            Ok::<_, LtxError>(())
-        })
-        .await??;
-    Ok(())
-}
-
-async fn write_compacted(
-    replica: &CellReplica,
-    inputs: &[SpoolInput],
-    spool_path: &Path,
-    body_path: &Path,
-    body_inputs: &[BodySpoolInput],
-    ltx_path: &Path,
-    codec_index_path: &Path,
-    index_path: &Path,
-) -> Result<CompactedArtifacts> {
-    let source = replica.host.filesystem.open(spool_path)?;
-    let mut body_source = replica.host.filesystem.open(body_path)?;
-    let mut entries = MergedEntries::new(vec![source], inputs.to_vec())?;
-    let output_file = replica.host.filesystem.open_rw(ltx_path)?;
-    let codec_index_file = replica.host.filesystem.open_rw(codec_index_path)?;
-    let sidecar_file = replica.host.filesystem.open_rw(index_path)?;
-    let first = inputs.first().ok_or(LtxError::TxNotAvailable)?;
-    let last = inputs.last().ok_or(LtxError::TxNotAvailable)?;
-    let mut state = OutputState::new(
-        output_file,
-        codec_index_file,
-        sidecar_file,
-        replica.limits,
-        &first.descriptor.info,
-        &last.descriptor.info,
-    )?;
-    let mut next = entries.next().transpose()?;
-    while let Some(first_entry) = next.take() {
-        let mut batch = vec![first_entry];
-        while let Some(entry) = entries.next().transpose()? {
-            let previous = batch.last().ok_or(LtxError::LTXCorrupted)?;
-            let encoded = batch.iter().try_fold(0_u64, |total, entry| {
-                total
-                    .checked_add(u64::from(entry.length))
-                    .ok_or(LtxError::LTXCorrupted)
-            })?;
-            if entry.object != previous.object
-                || entry.offset != previous.offset + u64::from(previous.length)
-                || encoded + u64::from(entry.length) > FRAME_READ_BYTES
-                || batch.len() as u64 * u64::from(first.descriptor.info.page_size)
-                    >= FRAME_READ_BYTES
-            {
-                next = Some(entry);
-                break;
-            }
-            batch.push(entry);
-        }
-        let range = body_range(&batch, body_inputs)?;
-        let page_size = first.descriptor.info.page_size;
-        let returned = replica
-            .host
-            .run(move || {
-                let frames = body_source.read_exact_at(range.start, range.length)?;
-                let pages = decode_pages(&batch, &frames, page_size)?;
-                Ok::<_, LtxError>((body_source, pages))
-            })
-            .await??;
-        body_source = returned.0;
-        let pages = returned.1;
-        state = replica.host.run(move || state.encode(pages)).await??;
-    }
-    let post_checksum = last.descriptor.info.post_checksum;
-    replica
-        .host
-        .run(move || state.finish(post_checksum))
-        .await?
-}
-
-fn body_range(entries: &[DirectoryEntry], inputs: &[BodySpoolInput]) -> Result<LocalBodyRange> {
-    let first = entries.first().ok_or(LtxError::LTXCorrupted)?;
-    let last = entries.last().ok_or(LtxError::LTXCorrupted)?;
-    let end = last
-        .offset
-        .checked_add(u64::from(last.length))
-        .ok_or(LtxError::LTXCorrupted)?;
-    if entries.iter().any(|entry| entry.object != first.object) {
-        return Err(LtxError::LTXCorrupted);
-    }
-    let input = inputs
-        .iter()
-        .find(|input| {
-            input.descriptor.object_digest() == first.object
-                && input.descriptor.offset() <= first.offset
-                && input
-                    .descriptor
-                    .offset()
-                    .checked_add(input.descriptor.info.size_bytes)
-                    .is_some_and(|input_end| end <= input_end)
-        })
-        .ok_or(LtxError::LTXCorrupted)?;
-    let start = input
-        .start
-        .checked_add(first.offset - input.descriptor.offset())
-        .ok_or(LtxError::LTXCorrupted)?;
-    let length = usize::try_from(end - first.offset).map_err(|_| LtxError::LTXCorrupted)?;
-    Ok(LocalBodyRange { start, length })
-}
-
-fn decode_pages(
-    entries: &[DirectoryEntry],
-    frames: &[u8],
-    page_size: u32,
-) -> Result<Vec<(u32, Vec<u8>)>> {
-    let first = entries.first().ok_or(LtxError::LTXCorrupted)?;
-    let mut pages = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let start =
-            usize::try_from(entry.offset - first.offset).map_err(|_| LtxError::LTXCorrupted)?;
-        let frame = frames
-            .get(start..start + entry.length as usize)
-            .ok_or(LtxError::LTXCorrupted)?;
-        if *blake3::hash(frame).as_bytes() != entry.frame_hash {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        let bytes = crate::paged::decode_frame(frame, page_size, entry.page)?;
-        if crate::ltx::checksum_page(entry.page, &bytes) != entry.checksum {
-            return Err(LtxError::ChecksumMismatch);
-        }
-        pages.push((entry.page, bytes));
-    }
-    Ok(pages)
-}
-
-struct OutputState {
-    encoder: crate::codec::Encoder<io::BufWriter<DigestWriter>>,
-    sidecar: io::BufWriter<DigestWriter>,
-}
-
-impl OutputState {
-    fn new(
-        output: Box<dyn FileIo>,
-        codec_index: Box<dyn FileIo>,
-        sidecar: Box<dyn FileIo>,
-        limits: crate::Limits,
-        first: &SegmentInfo,
-        last: &SegmentInfo,
-    ) -> Result<Self> {
-        if first.page_size != last.page_size {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let output = DigestWriter::new(output, limits.max_file_bytes);
-        let mut encoder = crate::codec::Encoder::new_block_with_index(
-            io::BufWriter::with_capacity(64 << 10, output),
-            Some(codec_index),
-        );
-        encoder.encode_header(crate::ltx::Header {
-            version: crate::ltx::VERSION,
-            flags: 0,
-            page_size: first.page_size,
-            commit: last.database_pages,
-            min_txid: Txid(first.min_txid),
-            max_txid: Txid(last.max_txid),
-            timestamp: 0,
-            pre_apply_checksum: first.pre_checksum,
-            ..crate::ltx::Header::default()
-        })?;
-        Ok(Self {
-            encoder,
-            sidecar: io::BufWriter::with_capacity(
-                64 << 10,
-                DigestWriter::new(sidecar, limits.max_plan_bytes),
-            ),
-        })
-    }
-
-    fn encode(mut self, pages: Vec<(u32, Vec<u8>)>) -> Result<Self> {
-        for (page, bytes) in pages {
-            let encoded = self.encoder.encode_page(
-                crate::ltx::PageHeader {
-                    pgno: page,
-                    flags: 0,
-                },
-                &bytes,
-            )?;
-            write_sidecar_entry(&mut self.sidecar, &encoded)?;
-        }
-        Ok(self)
-    }
-
-    fn finish(mut self, post_checksum: u64) -> Result<CompactedArtifacts> {
-        self.encoder.close(post_checksum)?;
-        // Flush both streams before DigestWriter checks the exact stored length
-        // and syncs; a partial buffered output must never become publishable.
-        let ltx = self
-            .encoder
-            .into_writer()
-            .into_inner()
-            .map_err(|error| error.into_error())?
-            .finish()?;
-        let index = self
-            .sidecar
-            .into_inner()
-            .map_err(|error| error.into_error())?
-            .finish()?;
-        Ok(CompactedArtifacts { ltx, index })
-    }
-}
-
-fn write_sidecar_entry(
-    writer: &mut impl io::Write,
-    page: &crate::codec::EncodedPage,
-) -> Result<()> {
-    writer.write_all(&page.page.to_be_bytes())?;
-    writer.write_all(&page.offset.to_be_bytes())?;
-    writer.write_all(&page.size.to_be_bytes())?;
-    writer.write_all(&page.frame_hash)?;
-    writer.write_all(&page.checksum.to_be_bytes())?;
-    Ok(())
-}
-
-struct DigestWriter {
-    file: Box<dyn FileIo>,
-    hasher: blake3::Hasher,
-    length: u64,
-    limit: u64,
-}
-
-impl DigestWriter {
-    fn new(file: Box<dyn FileIo>, limit: u64) -> Self {
-        Self {
-            file,
-            hasher: blake3::Hasher::new(),
-            length: 0,
-            limit,
-        }
-    }
-
-    fn finish(mut self) -> Result<Artifact> {
-        if self.file.file_len()? != self.length {
-            return Err(LtxError::LTXCorrupted);
-        }
-        self.file.sync_all()?;
-        Ok(Artifact {
-            digest: *self.hasher.finalize().as_bytes(),
-            length: self.length,
-        })
-    }
-}
-
-impl io::Write for DigestWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
-            .length
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| io::Error::other("compaction output length overflow"))?;
-        if next > self.limit {
-            return Err(io::Error::other("compaction output limit exceeded"));
-        }
-        self.file.write_all(bytes)?;
-        self.hasher.update(bytes);
-        self.length = next;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 struct CompactedArtifacts {
@@ -588,7 +196,6 @@ struct Artifact {
 #[derive(Clone)]
 struct SpoolInput {
     descriptor: SegmentDescriptor,
-    source: usize,
     start: u64,
     length: u64,
 }
@@ -604,146 +211,92 @@ struct LocalBodyRange {
     length: usize,
 }
 
-struct SpoolCursor {
-    input: SpoolInput,
-    offset: u64,
-    current: Option<DirectoryEntry>,
-}
-
-impl SpoolCursor {
-    fn new(input: SpoolInput, sources: &mut [Box<dyn FileIo>]) -> Result<Self> {
-        let mut cursor = Self {
-            offset: input.start,
-            input,
-            current: None,
-        };
-        cursor.advance(sources)?;
-        Ok(cursor)
-    }
-
-    fn advance(&mut self, sources: &mut [Box<dyn FileIo>]) -> Result<()> {
-        let end = self
-            .input
-            .start
-            .checked_add(self.input.length)
-            .ok_or(LtxError::LTXCorrupted)?;
-        if self.offset == end {
-            self.current = None;
-            return Ok(());
-        }
-        if self.offset > end || end - self.offset < crate::paged::ENTRY_BYTES as u64 {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let source = sources
-            .get_mut(self.input.source)
-            .ok_or(LtxError::LTXCorrupted)?;
-        let bytes = source.read_exact_at(self.offset, crate::paged::ENTRY_BYTES)?;
-        let entry = crate::paged::decode_index_entry(&bytes)?;
-        let descriptor = &self.input.descriptor;
-        self.current = Some(DirectoryEntry {
-            page: entry.page,
-            object: descriptor.object_digest(),
-            offset: descriptor
-                .offset()
-                .checked_add(entry.offset)
-                .ok_or(LtxError::LTXCorrupted)?,
-            length: u32::try_from(entry.size).map_err(|_| LtxError::LTXCorrupted)?,
-            frame_hash: entry.hash,
-            checksum: entry.checksum,
-        });
-        self.offset += crate::paged::ENTRY_BYTES as u64;
-        Ok(())
-    }
-}
-
 struct MergedEntries {
-    sources: Vec<Box<dyn FileIo>>,
+    source: Box<dyn FileIo>,
     cursors: Vec<SpoolCursor>,
-    heap: BinaryHeap<Reverse<(u32, usize)>>,
-    valid_through: Vec<u32>,
-    failed: bool,
+    merge: LocatorMerge,
 }
 
 impl MergedEntries {
-    fn new(mut sources: Vec<Box<dyn FileIo>>, inputs: Vec<SpoolInput>) -> Result<Self> {
-        if inputs.is_empty() {
-            return Err(LtxError::LTXCorrupted);
-        }
-        let mut valid_through = vec![0; inputs.len()];
-        let mut suffix_min = u32::MAX;
-        for (index, input) in inputs.iter().enumerate().rev() {
-            suffix_min = suffix_min.min(input.descriptor.info.database_pages);
-            valid_through[index] = suffix_min;
-        }
-        let mut cursors = Vec::with_capacity(inputs.len());
-        let mut heap = BinaryHeap::new();
-        for input in inputs {
-            let cursor = SpoolCursor::new(input, &mut sources)?;
-            let index = cursors.len();
-            if let Some(entry) = &cursor.current {
-                heap.push(Reverse((entry.page, index)));
+    async fn open(
+        host: &crate::Host,
+        mut source: Box<dyn FileIo>,
+        inputs: Vec<SpoolInput>,
+    ) -> Result<Self> {
+        host.run(move || {
+            const TOTAL_BUFFER_ENTRIES: usize = 16_384;
+            let buffer_entries = TOTAL_BUFFER_ENTRIES
+                .checked_div(inputs.len())
+                .filter(|entries| *entries > 0)
+                .ok_or(LtxError::LTXCorrupted)?
+                .min(1_024);
+            let mut merge = LocatorMerge::new(
+                inputs
+                    .iter()
+                    .map(|input| input.descriptor.info.database_pages),
+            );
+            let mut cursors = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let cursor = SpoolCursor::new(input, source.as_mut(), buffer_entries)?;
+                if let Some(entry) = &cursor.current {
+                    merge.push(cursors.len(), entry.page);
+                }
+                cursors.push(cursor);
             }
-            cursors.push(cursor);
-        }
-        Ok(Self {
-            sources,
-            cursors,
-            heap,
-            valid_through,
-            failed: false,
+            Ok(Self {
+                source,
+                cursors,
+                merge,
+            })
         })
+        .await?
     }
 
-    fn take_current(&mut self, index: usize) -> Result<DirectoryEntry> {
-        let cursor = self.cursors.get_mut(index).ok_or(LtxError::LTXCorrupted)?;
-        let entry = cursor.current.take().ok_or(LtxError::LTXCorrupted)?;
-        cursor.advance(&mut self.sources)?;
-        if let Some(next) = &cursor.current {
-            self.heap.push(Reverse((next.page, index)));
+    fn next_batch(&mut self) -> Result<(Vec<DirectoryEntry>, bool)> {
+        let mut batch = Vec::new();
+        let mut visited = 0;
+        // Stop between page groups, including discarded pages. One group
+        // visits at most the admitted descriptor count.
+        while visited < 4_096 {
+            let next = self.merge.next_group(|index| {
+                visited += 1;
+                let cursor = self.cursors.get_mut(index).ok_or(LtxError::LTXCorrupted)?;
+                let entry = cursor.current.take().ok_or(LtxError::LTXCorrupted)?;
+                cursor.advance(self.source.as_mut())?;
+                Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
+            });
+            match next {
+                Some(Ok(Some(entry))) => batch.push(entry),
+                Some(Ok(None)) => {}
+                Some(Err(error)) => return Err(error),
+                None => return Ok((batch, true)),
+            }
         }
-        Ok(entry)
+        Ok((batch, false))
     }
-}
 
-impl Iterator for MergedEntries {
-    type Item = Result<DirectoryEntry>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return None;
-        }
-        loop {
-            let Reverse((page, first_index)) = self.heap.pop()?;
-            let mut selected = None;
-            let mut index = first_index;
-            loop {
-                let entry = match self.take_current(index) {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        self.failed = true;
-                        self.heap.clear();
-                        return Some(Err(error));
-                    }
+    fn stream(self, host: crate::Host) -> impl futures_util::Stream<Item = Result<DirectoryEntry>> {
+        stream::try_unfold(Some(self), move |entries| {
+            let host = host.clone();
+            async move {
+                let Some(mut entries) = entries else {
+                    return Ok::<_, LtxError>(None);
                 };
-                if page <= self.valid_through[index]
-                    && selected
-                        .as_ref()
-                        .is_none_or(|(selected_index, _)| index > *selected_index)
-                {
-                    selected = Some((index, entry));
+                let (entries, batch, finished) = host
+                    .run(move || {
+                        let (batch, finished) = entries.next_batch()?;
+                        Ok::<_, LtxError>((entries, batch, finished))
+                    })
+                    .await??;
+                if finished && batch.is_empty() {
+                    return Ok(None);
                 }
-                let Some(Reverse((next_page, next_index))) = self.heap.peek().copied() else {
-                    break;
-                };
-                if next_page != page {
-                    break;
-                }
-                self.heap.pop();
-                index = next_index;
+                Ok(Some((
+                    stream::iter(batch.into_iter().map(Ok)),
+                    (!finished).then_some(entries),
+                )))
             }
-            if let Some((_, entry)) = selected {
-                return Some(Ok(entry));
-            }
-        }
+        })
+        .try_flatten()
     }
 }

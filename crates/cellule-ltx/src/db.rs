@@ -1,3 +1,4 @@
+//! Managed database over the local replica: admissions, checkpoints, and cut publishing.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -5,6 +6,9 @@ use rusqlite::{Connection, Transaction};
 
 use crate::{CaptureBatch, Limits, LocalSegment, LtxError, Position, Result, SegmentInfo};
 use crate::{capture::CaptureEngine, host::LtxHost, ltx, types::Txid};
+
+#[cfg(feature = "replica")]
+pub use crate::writable_vfs::{HydrationBatch, HydrationRead};
 
 /// Number of SQLite connections retained by one open managed database.
 pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
@@ -104,6 +108,35 @@ impl Db {
         })
     }
 
+    /// Selects up to 64 missing pages for asynchronous background hydration.
+    ///
+    /// The caller owns fetch admission and must install only on this activation.
+    #[cfg(feature = "replica")]
+    pub fn prepare_hydration(&self, pages: u32) -> Result<Option<HydrationRead>> {
+        self.ensure_active()?;
+        self.paged
+            .as_ref()
+            .map(|paged| paged.prepare_hydration(pages))
+            .transpose()
+    }
+
+    /// Installs authenticated pages without provider I/O on the SQLite worker.
+    ///
+    /// Superseded pages are skipped. An installation failure fences this Db.
+    #[cfg(feature = "replica")]
+    pub fn install_hydration(&mut self, batch: HydrationBatch) -> Result<crate::Hydration> {
+        self.ensure_active()?;
+        let result = self
+            .paged
+            .as_mut()
+            .ok_or(LtxError::InvalidState("not a sparse activation"))?
+            .install_hydration(&self.writer, batch);
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
     /// Takes the provider/checksum source behind a sparse SQLite I/O error.
     #[cfg(feature = "replica")]
     pub fn take_io_error(&self) -> Option<LtxError> {
@@ -140,8 +173,20 @@ impl Db {
                 index += 1;
                 continue;
             }
-            let bytes = self.host.read(segment.path(), segment.info().size_bytes)?;
-            crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+            let mut file = LtxHost {
+                facilities: self.host.clone(),
+                max_database_bytes: self.limits.max_database_bytes,
+                max_file_bytes: segment.info().size_bytes,
+            }
+            .open(segment.path())?;
+            if file.file_len()? != segment.info().size_bytes {
+                return Err(LtxError::ChecksumMismatch);
+            }
+            crate::recovery::verify_segment_reader(
+                std::io::BufReader::with_capacity(64 << 10, file),
+                segment.info(),
+                self.limits,
+            )?;
             // The published immutable root, not durable local deletion, releases
             // the result. A fresh session never adopts crash-resurrected residue.
             self.host.filesystem.remove_file(segment.path())?;
@@ -176,7 +221,7 @@ impl Db {
         if u64::from(materialized.database_pages) * u64::from(materialized.page_size)
             > limits.max_database_bytes
         {
-            return Err(LtxError::Limit("database bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::DatabaseBytes));
         }
         let database_bytes =
             u64::from(materialized.database_pages) * u64::from(materialized.page_size);
@@ -276,7 +321,7 @@ impl Db {
         facilities
             .filesystem
             .create_dir(&CaptureEngine::meta_path_for(path))?;
-        let capture = CaptureEngine::open_with_host(path, host, vfs)?;
+        let capture = CaptureEngine::open_with_host(path, host, vfs, limits.max_capture_bytes)?;
         let writer = open_connection(path, vfs)?;
         writer.busy_timeout(std::time::Duration::from_secs(1))?;
         writer.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -285,7 +330,7 @@ impl Db {
         let page_size: u32 = writer.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let max_pages = limits.max_database_bytes / u64::from(page_size);
         if max_pages == 0 {
-            return Err(LtxError::Limit("database page size"));
+            return Err(LtxError::Limit(crate::LimitKind::DatabasePageSize));
         }
         writer.pragma_update(None, "max_page_count", max_pages)?;
         let observer = crate::commit::CommitObserver::install(&writer);
@@ -333,6 +378,11 @@ impl Db {
     /// writer remains reusable. SQLite commit/rollback ambiguity fences the
     /// writer. A successful return is still local-only until capture and remote
     /// publication complete.
+    ///
+    /// A commit larger than `Limits::max_capture_bytes` is not refused: the
+    /// later capture represents it as a full database image, which is bounded
+    /// by `Limits::max_file_bytes`, so a large write can never leave a local
+    /// commit that the session cannot capture.
     pub fn transaction_with<T, E>(
         &mut self,
         operation: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
@@ -343,10 +393,10 @@ impl Db {
         self.ensure_active()
             .map_err(crate::TransactionError::Capture)?;
         self.ensure_capacity()
-            .map_err(crate::TransactionError::Capture)?;
+            .map_err(crate::TransactionError::Admission)?;
         let disk_before = self.local_disk.bytes();
         let write_bytes = self.limits.max_capture_bytes.checked_mul(2).ok_or(
-            crate::TransactionError::Admission(LtxError::Limit("local disk bytes")),
+            crate::TransactionError::Admission(LtxError::Limit(crate::LimitKind::LocalDiskBytes)),
         )?;
         self.local_disk
             .try_grow(write_bytes)
@@ -365,7 +415,16 @@ impl Db {
         let value = match operation(&tx) {
             Ok(value) => value,
             Err(error) => {
-                if let Err(rollback) = tx.rollback() {
+                // FULL, interrupt, and ROLLBACK constraints can end the whole
+                // transaction. A second rollback would falsely fence the writer;
+                // autocommit proves rollback only if no WAL commit was observed.
+                let rollback = if tx.is_autocommit() && self.observer.frames() == 0 {
+                    drop(tx);
+                    Ok(())
+                } else {
+                    tx.rollback()
+                };
+                if let Err(rollback) = rollback {
                     self.fenced = true;
                     return Err(crate::TransactionError::Sqlite(rollback));
                 }
@@ -419,20 +478,27 @@ impl Db {
 
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
-    /// Any failure fences further use, since some local cuts may already exist.
-    /// Retain returned files until the canonical Cell root publishes;
-    /// `prune_captured` can then release one exact acknowledged batch.
+    /// A failure that can leave partial local state fences further use. A
+    /// declared capacity refusal happens before the cut is written, so the
+    /// session stays active with [`Self::has_pending_capture`] reporting the
+    /// uncaptured commit; the host may clear the obstruction and retry, or
+    /// discard the session and restore authoritative state. Retain returned
+    /// files until the canonical Cell root publishes; `prune_captured` can then
+    /// release one exact acknowledged batch.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         self.flush_pending_durability()?;
-        let (result, timing) = self.capture_inner(false);
+        let (result, timing, wrote_cut) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
             batch.timing = timing;
             batch
         });
-        if result.is_err() {
+        // A failure after the cut writer started can leave partial local state,
+        // so the session fences. A refusal raised before the writer starts only
+        // declined work, and the pending WAL cut stays recoverable.
+        if result.is_err() && wrote_cut {
             self.fenced = true;
         }
         result
@@ -446,10 +512,14 @@ impl Db {
     /// callers must complete the barrier before acknowledging a locally durable
     /// batch. A higher-level protocol may instead publish the exact bytes to its
     /// own durability boundary, then pass that published batch to
-    /// [`Self::prune_captured`]. A failed local barrier fences the session.
+    /// `prune_captured`. A failed local barrier fences the session.
+    ///
+    /// As with [`Self::capture`], a declared capacity refusal that happens
+    /// before any cut is written leaves the session active with
+    /// [`Self::has_pending_capture`] set.
     pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
-        let (result, timing) = self.capture_inner(true);
+        let (result, timing, wrote_cut) = self.capture_inner(true);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
@@ -462,7 +532,7 @@ impl Db {
             );
             batch
         });
-        if result.is_err() {
+        if result.is_err() && wrote_cut {
             self.fenced = true;
         }
         result
@@ -470,9 +540,9 @@ impl Db {
 
     /// Makes all files published by deferred captures durable as one barrier.
     ///
-    /// The barrier syncs each completed file before syncing each destination
-    /// directory once. If either step fails, the session is fenced and pending
-    /// paths remain tracked for diagnostics; no caller may acknowledge them.
+    /// The barrier syncs each completed file, each destination directory once,
+    /// and the new LTX directory chain once per session. If any step fails, the
+    /// session is fenced; no caller may acknowledge the pending paths.
     pub fn durability_barrier(&mut self) -> Result<()> {
         self.ensure_active()?;
         self.flush_pending_durability()
@@ -498,7 +568,9 @@ impl Db {
                 .try_for_each(|path| self.host.filesystem.sync_parent(path))?;
             Ok::<(), std::io::Error>(())
         })()
-        .map_err(LtxError::from);
+        .map_err(LtxError::from)
+        // A new LTX parent name cannot survive merely because its own contents did.
+        .and_then(|()| self.capture.sync_l0_ancestors());
         if result.is_ok() {
             self.pending_durability.clear();
         } else {
@@ -507,15 +579,25 @@ impl Db {
         result
     }
 
+    /// Runs one capture attempt.
+    ///
+    /// The returned flag reports whether the attempt could have written local
+    /// cut state: a refusal raised before the writer starts leaves the session
+    /// intact, while any later failure requires fencing.
     fn capture_inner(
         &mut self,
         defer_durability: bool,
-    ) -> (Result<CaptureBatch>, crate::CaptureTiming) {
+    ) -> (Result<CaptureBatch>, crate::CaptureTiming, bool) {
         self.capture.start_timing(self.host.now_monotonic());
         self.capture
             .timing_begin(crate::capture::TimingPhase::Preparation);
+        if let Err(error) = self.ensure_capacity() {
+            self.capture
+                .timing_end(crate::capture::TimingPhase::Preparation);
+            let timing = self.capture.finish_timing(self.host.now_monotonic());
+            return (Err(error), timing, false);
+        }
         let result = (|| {
-            self.ensure_capacity()?;
             self.capture
                 .timing_end(crate::capture::TimingPhase::Preparation);
             let before = self.capture.pos();
@@ -530,7 +612,7 @@ impl Db {
             Ok(batch)
         })();
         let timing = self.capture.finish_timing(self.host.now_monotonic());
-        (result, timing)
+        (result, timing, true)
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
@@ -539,13 +621,16 @@ impl Db {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.capture.ltx_path(0, Txid(txid), Txid(txid)));
-                let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
+                let info = if let Some(info) = self.capture.take_sealed_l0_segment(Txid(txid)) {
                     info
                 } else {
+                    // The inspection limit is the full-file bound: a captured
+                    // cut may be a full database image, which the writer already
+                    // bounded by `max_file_bytes`.
                     let file = crate::LtxHost {
                         facilities: self.host.clone(),
                         max_database_bytes: self.limits.max_database_bytes,
-                        max_file_bytes: self.limits.max_capture_bytes,
+                        max_file_bytes: self.limits.max_file_bytes,
                     }
                     .open(&path)?;
                     self.capture
@@ -558,7 +643,10 @@ impl Db {
                 };
                 self.capture.timing_add_ltx_bytes(info.size_bytes);
                 self.capture.timing_add_segment();
-                self.account_capture(&info)?;
+                // The capture writer already enforced the tighter incremental
+                // bound for delta cuts, so retention accounting only has to
+                // honor the file bound shared by every cut.
+                self.account(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
                 let segment = match self.capture.take_sealed_l0_captured_index(Txid(txid)) {
@@ -584,14 +672,14 @@ impl Db {
     pub fn checkpoint(&mut self, mode: crate::CheckpointMode) -> Result<CaptureBatch> {
         self.ensure_active()?;
         self.flush_pending_durability()?;
-        let (initial, mut timing) = self.capture_inner(false);
+        let (initial, mut timing, _) = self.capture_inner(false);
         let result = (|| {
             let mut batch = initial?;
             self.local_disk.try_grow(
                 self.limits
                     .max_capture_bytes
                     .checked_mul(2)
-                    .ok_or(LtxError::Limit("local disk bytes"))?,
+                    .ok_or(LtxError::Limit(crate::LimitKind::LocalDiskBytes))?,
             )?;
             let before = self.capture.pos();
             self.capture.start_timing(self.host.now_monotonic());
@@ -620,6 +708,103 @@ impl Db {
         self.capture.pos().into()
     }
 
+    /// Writes the continuation a later [`Db::open_resumed`] continues from.
+    ///
+    /// The session must be drained: a pending capture means a local commit has
+    /// no published cut, so the continuation would name a position no root
+    /// owns. A sparse activation must be fully materialized, because its
+    /// local file holds zeros where no page was ever faulted in. The record
+    /// authorizes nothing by itself — the caller still has to prove that the
+    /// file holds one authoritative root before opening it.
+    #[cfg(feature = "replica")]
+    pub fn persist_continuation(&self) -> Result<()> {
+        self.ensure_active()?;
+        if self.has_pending_capture() {
+            return Err(LtxError::InvalidState(
+                "capture continuation requires a drained database",
+            ));
+        }
+        if self.sparse && !self.hydration()?.is_some_and(crate::Hydration::complete) {
+            return Err(LtxError::InvalidState(
+                "capture continuation requires a fully materialized activation",
+            ));
+        }
+        let position = self.position();
+        let pages = self.capture.checksums().count();
+        let page_size = self.capture.page_size();
+        if position.txid == 0 || pages == 0 || position.checksum & crate::CHECKSUM_FLAG == 0 {
+            return Err(LtxError::InvalidState(
+                "capture continuation requires a committed position",
+            ));
+        }
+        crate::resume::write_checksums(&self.host, &self.path, self.capture.checksums())?;
+        crate::resume::write_continuation(
+            &self.host,
+            &self.path,
+            &crate::resume::Continuation {
+                position,
+                page_size,
+                pages,
+            },
+        )
+    }
+
+    /// Opens a database that a clean close left resumable at the same path.
+    ///
+    /// Reads the continuation and dense page checksums recorded beside the file,
+    /// requires the file to be exactly the recorded image, and seeds the capture
+    /// session from them. No origin object is read, so the caller must have
+    /// matched its own resume record against the authoritative control first.
+    #[cfg(feature = "replica")]
+    pub fn open_resumed(path: &Path, limits: Limits) -> Result<Self> {
+        Self::open_resumed_with_host(path, limits, crate::Host::default())
+    }
+
+    /// Opens a resumable database using the host's filesystem, SQLite VFS, and clock.
+    #[cfg(feature = "replica")]
+    pub fn open_resumed_with_host(path: &Path, limits: Limits, host: crate::Host) -> Result<Self> {
+        let limits = limits.validate()?;
+        let continuation = crate::resume::read_continuation(&host, path)?;
+        let database_bytes = u64::from(continuation.pages) * u64::from(continuation.page_size);
+        if database_bytes > limits.max_database_bytes {
+            return Err(LtxError::Limit(crate::LimitKind::DatabaseBytes));
+        }
+        if host.filesystem.file_len(path)? != database_bytes {
+            return Err(LtxError::InvalidState(
+                "resumed database length does not match its continuation",
+            ));
+        }
+        let ltx_host = crate::LtxHost {
+            facilities: host.clone(),
+            max_database_bytes: limits.max_database_bytes,
+            max_file_bytes: limits.max_database_bytes,
+        };
+        let checksums = crate::pages::PageChecksums::from_file(
+            crate::LtxHost {
+                facilities: host.clone(),
+                max_database_bytes: limits.max_database_bytes,
+                max_file_bytes: limits.max_database_bytes,
+            },
+            &crate::resume::checksum_path(path),
+            continuation.page_size,
+            continuation.pages,
+            continuation.position.checksum,
+        )?;
+        // The continuation and sidecar name a published image; a same-length
+        // local corruption must fall back to the authoritative root.
+        checksums.verify_database(&ltx_host, path, continuation.page_size)?;
+        let vfs = host.sqlite_vfs.clone();
+        let local_disk = host.reserve_local_disk(database_bytes)?;
+        let mut db = Self::open_inner(path, limits, vfs.as_deref(), host, false, Some(local_disk))?;
+        db.capture.seed_continuation(
+            continuation.position,
+            checksums,
+            continuation.page_size,
+            continuation.pages,
+        )?;
+        Ok(db)
+    }
+
     /// Captures pending commits, then writes a full checksum-bearing snapshot.
     ///
     /// Its range is `1..=position.txid`. The snapshot can replace all preceding
@@ -636,7 +821,7 @@ impl Db {
 
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         self.flush_pending_durability()?;
-        let (batch, timing) = self.capture_inner(false);
+        let (batch, timing, _) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, batch.is_ok());
         let mut batch = batch?;
@@ -694,37 +879,37 @@ impl Db {
         if self.retained_segments >= self.limits.max_segments
             || self.retained_bytes >= self.limits.max_plan_bytes
         {
-            return Err(LtxError::Limit(
-                "retained capture artifacts; rotate session",
-            ));
+            return Err(LtxError::Limit(crate::LimitKind::RetainedCaptureArtifacts));
         }
         Ok(())
+    }
+
+    /// Reports whether a committed WAL cut is waiting for capture.
+    ///
+    /// While this is true the local database holds a commit that no LTX file
+    /// covers, so the host must not acknowledge it, serve it, or reuse the
+    /// session's local state. Retry [`Db::capture`] after clearing the
+    /// obstruction, or discard the session and restore authoritative state.
+    #[must_use]
+    pub fn has_pending_capture(&self) -> bool {
+        self.required_cut.is_some()
     }
 
     fn account(&mut self, info: &SegmentInfo) -> Result<()> {
         if info.size_bytes > self.limits.max_file_bytes {
-            return Err(LtxError::Limit("LTX file bytes"));
+            return Err(LtxError::Limit(crate::LimitKind::LtxFileBytes));
         }
         self.retained_bytes = self
             .retained_bytes
             .checked_add(info.size_bytes)
-            .ok_or(LtxError::Limit("retained bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::RetainedBytes))?;
         self.retained_segments += 1;
         if self.retained_segments > self.limits.max_segments
             || self.retained_bytes > self.limits.max_plan_bytes
         {
-            return Err(LtxError::Limit(
-                "retained capture artifacts; rotate session",
-            ));
+            return Err(LtxError::Limit(crate::LimitKind::RetainedCaptureArtifacts));
         }
         Ok(())
-    }
-
-    fn account_capture(&mut self, info: &SegmentInfo) -> Result<()> {
-        if info.size_bytes > self.limits.max_capture_bytes {
-            return Err(LtxError::Limit("captured LTX bytes"));
-        }
-        self.account(info)
     }
 
     fn reconcile_local_disk(&self) -> Result<()> {
@@ -740,9 +925,9 @@ impl Db {
         };
         let live = database_bytes
             .checked_add(self.retained_bytes)
-            .ok_or(LtxError::Limit("local disk bytes"))?
+            .ok_or(LtxError::Limit(crate::LimitKind::LocalDiskBytes))?
             .checked_add(wal_bytes)
-            .ok_or(LtxError::Limit("local disk bytes"))?;
+            .ok_or(LtxError::Limit(crate::LimitKind::LocalDiskBytes))?;
         self.local_disk.resize(live)
     }
 }
@@ -770,7 +955,7 @@ impl SnapshotScratch {
         for _ in 0..16 {
             let mut scratch_name = filename.to_owned();
             scratch_name.push(format!(
-                ".cellule-snapshot-{}-{}",
+                ".crab-snapshot-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
@@ -816,9 +1001,13 @@ pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Resul
         Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
         None => Connection::open(path),
     }?;
-    disable_lookaside(&connection)?;
-    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
+    configure_managed_connection(&connection)?;
     Ok(connection)
+}
+
+pub(crate) fn configure_managed_connection(connection: &Connection) -> rusqlite::Result<()> {
+    disable_lookaside(connection)?;
+    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)
 }
 
 fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
@@ -827,8 +1016,8 @@ fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
     // SQLite's default lookaside arena reserves memory per connection. Managed
     // LTX connections use a small, stable statement vocabulary, so keeping
     // that arena only adds resident cost across a dense Cell fleet.
-    // SAFETY: the connection was opened immediately above and no SQLite
-    // operation has run, so no lookaside slot can be in use.
+    // SAFETY: callers configure a newly opened connection before any SQLite
+    // operation, so no lookaside slot can be in use.
     let result = unsafe {
         ffi::sqlite3_db_config(
             connection.handle(),
@@ -877,409 +1066,4 @@ pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Re
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        path::Path,
-        sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        },
-        time::{Duration, Instant},
-    };
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("inventory rejected the command")]
-    struct Rejected;
-
-    struct TimingClock {
-        origin: Instant,
-        ticks: AtomicU64,
-    }
-
-    impl TimingClock {
-        fn new() -> Self {
-            Self {
-                origin: Instant::now(),
-                ticks: AtomicU64::new(0),
-            }
-        }
-    }
-
-    impl crate::environment::Clock for TimingClock {
-        fn unix_millis(&self) -> i64 {
-            123456789
-        }
-
-        fn file_age(&self, _: &Path) -> std::io::Result<Duration> {
-            Ok(Duration::ZERO)
-        }
-
-        fn monotonic(&self) -> Instant {
-            self.origin + Duration::from_micros(self.ticks.fetch_add(1, Ordering::Relaxed))
-        }
-    }
-
-    #[test]
-    fn managed_connections_set_the_budgeted_page_cache() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let connection = open_connection(&temp.path().join("cache.sqlite"), None).unwrap();
-        let cache_kib: i64 = connection
-            .query_row("PRAGMA cache_size", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
-    }
-
-    #[test]
-    fn capture_reports_deterministic_bounded_timing_for_real_ltx_work() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let host = crate::Host::default().with_clock(Arc::new(TimingClock::new()));
-        let mut db =
-            Db::open_with_host(&temp.path().join("timed.sqlite"), Limits::default(), host).unwrap();
-        db.transaction(|tx| {
-            tx.execute_batch("CREATE TABLE events(value TEXT); INSERT INTO events VALUES ('ok')")
-        })
-        .unwrap();
-
-        let batch = db.capture().unwrap();
-        let phase_nanos = batch.timing.preparation_nanos
-            + batch.timing.schema_check_nanos
-            + batch.timing.wal_existence_nanos
-            + batch.timing.position_resolution_nanos
-            + batch.timing.wal_read_nanos
-            + batch.timing.page_collection_nanos
-            + batch.timing.verification_nanos
-            + batch.timing.encode_nanos
-            + batch.timing.local_write_nanos
-            + batch.timing.fsync_nanos
-            + batch.timing.parent_sync_nanos
-            + batch.timing.checkpoint_nanos;
-        let ltx_bytes = batch
-            .segments
-            .iter()
-            .map(|segment| segment.info().size_bytes)
-            .sum::<u64>();
-        let segment = &batch.segments[0];
-        let file = crate::LtxHost {
-            facilities: crate::Host::default(),
-            max_database_bytes: Limits::default().max_database_bytes,
-            max_file_bytes: Limits::default().max_file_bytes,
-        }
-        .open(segment.path())
-        .unwrap();
-        let (decoded, size, digest) = crate::ltx::inspect_reader(file).unwrap();
-        assert_eq!(
-            segment.info(),
-            &crate::SegmentInfo::from_inspected(&decoded, size, digest)
-        );
-        assert!(batch.timing.total_nanos > 0);
-        assert!(phase_nanos <= batch.timing.total_nanos);
-        assert_eq!(batch.timing.segment_count as usize, batch.segments.len());
-        assert_eq!(batch.timing.ltx_bytes, ltx_bytes);
-        assert!(batch.timing.wal_bytes > 0);
-        assert!(batch.timing.database_bytes > 0);
-        assert!(batch.timing.schema_check_nanos > 0);
-        assert!(batch.timing.wal_existence_nanos > 0);
-        assert!(batch.timing.position_resolution_nanos > 0);
-        assert!(batch.timing.page_collection_nanos > 0);
-        assert!(batch.timing.local_write_nanos > 0);
-        assert!(batch.timing.fsync_nanos > 0);
-        assert!(batch.timing.parent_sync_nanos > 0);
-        assert_eq!(
-            batch.timing.wal_sparse_reads + batch.timing.wal_full_reads,
-            1
-        );
-        assert!(batch.timing.wal_image_bytes > 0);
-        assert!(batch.timing.wal_file_bytes >= batch.timing.wal_read_bytes);
-        assert!(batch.timing.wal_read_bytes > 0);
-        assert_eq!(batch.timing.wal_snapshot_reads, 1);
-    }
-
-    #[cfg(feature = "replica")]
-    #[test]
-    fn failed_capture_emits_its_bounded_ledger() {
-        #[derive(Default)]
-        struct CaptureTelemetry(std::sync::Mutex<Vec<(crate::CaptureTiming, bool)>>);
-
-        impl crate::LtxTelemetry for CaptureTelemetry {
-            fn capture(&self, timing: &crate::CaptureTiming, succeeded: bool) {
-                self.0.lock().unwrap().push((*timing, succeeded));
-            }
-        }
-
-        let temp = tempfile::TempDir::new().unwrap();
-        let telemetry = Arc::new(CaptureTelemetry::default());
-        let host = crate::Host::default().with_ltx_telemetry(telemetry.clone());
-        let limits = Limits {
-            max_capture_bytes: 128,
-            ..Limits::default()
-        };
-        let mut db = Db::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
-        db.transaction(|tx| {
-            tx.execute_batch(
-                "CREATE TABLE events(value BLOB); INSERT INTO events VALUES(randomblob(4096))",
-            )
-        })
-        .unwrap();
-
-        assert!(db.capture().is_err());
-        let attempts = telemetry.0.lock().unwrap();
-        assert_eq!(attempts.len(), 1);
-        assert!(!attempts[0].1);
-        assert!(attempts[0].0.total_nanos > 0);
-        assert!(attempts[0].0.wal_read_bytes > 0);
-    }
-
-    #[cfg(feature = "replica")]
-    #[test]
-    fn captured_indexes_match_independent_ltx_inspection() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let mut db = Db::open(&temp.path().join("indexed.sqlite"), Limits::default()).unwrap();
-        db.transaction(|transaction| {
-            transaction.execute_batch(
-                "CREATE TABLE payload(value BLOB); \
-                 INSERT INTO payload VALUES(randomblob(200000))",
-            )
-        })
-        .unwrap();
-
-        let batch = db.capture().unwrap();
-
-        for segment in &batch.segments {
-            let file = std::fs::File::open(segment.path()).unwrap();
-            let (decoded, size, digest, pages) =
-                crate::ltx::inspect_reader_with_index(file).unwrap();
-            assert_eq!(
-                crate::SegmentInfo::from_inspected(&decoded, size, digest),
-                *segment.info()
-            );
-            assert_eq!(
-                segment.captured_index().unwrap().as_ref(),
-                crate::paged::encode_index_from_pages(&pages)
-                    .unwrap()
-                    .as_slice()
-            );
-            let cloned = segment.clone();
-            assert_eq!(
-                segment.captured_index().unwrap().as_ptr(),
-                cloned.captured_index().unwrap().as_ptr()
-            );
-        }
-        db.close().unwrap();
-    }
-
-    #[test]
-    fn managed_connections_disable_sqlite_lookaside() {
-        use rusqlite::ffi;
-
-        let temp = tempfile::TempDir::new().unwrap();
-        for index in 0..MANAGED_SQLITE_CONNECTIONS {
-            let connection =
-                open_connection(&temp.path().join(format!("lookaside-{index}.sqlite")), None)
-                    .unwrap();
-            let _statement = connection.prepare("SELECT 1").unwrap();
-            let mut current = 0;
-            let mut highwater = 0;
-            let result = unsafe {
-                // SAFETY: the connection remains alive and is exclusively
-                // borrowed for the duration of this status query.
-                ffi::sqlite3_db_status(
-                    connection.handle(),
-                    ffi::SQLITE_DBSTATUS_LOOKASIDE_USED,
-                    &mut current,
-                    &mut highwater,
-                    0,
-                )
-            };
-            assert_eq!(result, ffi::SQLITE_OK);
-            assert_eq!(current, 0);
-            assert_eq!(highwater, 0);
-        }
-    }
-
-    #[test]
-    fn local_disk_admission_rejects_before_running_the_transaction() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let budget = crate::DiskBudget::new(255);
-        let host = crate::Host::default().with_local_disk_budget(budget.clone());
-        let limits = Limits {
-            max_capture_bytes: 128,
-            ..Limits::default()
-        };
-        let mut db = Db::open_with_host(&temp.path().join("disk.sqlite"), limits, host).unwrap();
-        let ran = std::cell::Cell::new(false);
-
-        let result = db.transaction(|_| {
-            ran.set(true);
-            Ok(())
-        });
-
-        assert!(matches!(result, Err(LtxError::Limit("local disk bytes"))));
-        assert!(!ran.get());
-        assert_eq!(budget.used(), 0);
-    }
-
-    #[test]
-    fn existing_database_disk_admission_precedes_session_claim() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("existing.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("CREATE TABLE t(v)").unwrap();
-        drop(connection);
-        let bytes = std::fs::metadata(&path).unwrap().len();
-        let host = crate::Host::default()
-            .with_local_disk_budget(crate::DiskBudget::new(bytes.saturating_sub(1)));
-
-        let result = Db::open_with_host(&path, Limits::default(), host);
-
-        assert!(matches!(result, Err(LtxError::Limit("local disk bytes"))));
-        assert!(!CaptureEngine::meta_path_for(&path).exists());
-    }
-
-    #[test]
-    fn resume_disk_admission_precedes_database_installation() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let source_path = temp.path().join("source.sqlite");
-        let limits = Limits::default();
-        let mut source = Db::open(&source_path, limits).unwrap();
-        source
-            .transaction(|transaction| {
-                transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
-            })
-            .unwrap();
-        let batch = source.capture().unwrap();
-        let plan = crate::VerifiedPlan::new(&batch.segments, batch.position, limits).unwrap();
-        source.close().unwrap();
-        let database_bytes = u64::from(batch.segments[0].info().database_pages)
-            * u64::from(batch.segments[0].info().page_size);
-        let host = crate::Host::default()
-            .with_local_disk_budget(crate::DiskBudget::new(database_bytes.saturating_sub(1)));
-        let destination = temp.path().join("destination.sqlite");
-
-        let result = Db::resume_with_host(&plan, &destination, limits, host);
-
-        assert!(matches!(result, Err(LtxError::Limit("local disk bytes"))));
-        assert!(!destination.exists());
-    }
-
-    #[test]
-    fn pending_wal_and_captured_segments_reconcile_and_release_disk_admission() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("accounted.sqlite");
-        let budget = crate::DiskBudget::new(4 * 1024 * 1024);
-        let host = crate::Host::default().with_local_disk_budget(budget.clone());
-        let limits = Limits {
-            max_capture_bytes: 1024 * 1024,
-            ..Limits::default()
-        };
-        let mut db = Db::open_with_host(&path, limits, host).unwrap();
-
-        db.transaction(|transaction| {
-            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
-        })
-        .unwrap();
-        assert_eq!(budget.used(), 2 * limits.max_capture_bytes);
-
-        let batch = db.capture().unwrap();
-        let retained = batch
-            .segments
-            .iter()
-            .map(|segment| segment.info().size_bytes)
-            .sum::<u64>();
-        let wal = std::fs::metadata(format!("{}-wal", path.display()))
-            .unwrap()
-            .len();
-        let database = std::fs::metadata(&path).unwrap().len();
-        assert_eq!(budget.used(), database + retained + wal);
-
-        db.close().unwrap();
-        assert_eq!(budget.used(), 0);
-    }
-
-    #[test]
-    fn typed_operation_error_rolls_back_and_keeps_writer_usable() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let mut db = Db::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
-        db.transaction(|tx| tx.execute_batch("CREATE TABLE inventory(value INTEGER NOT NULL)"))
-            .unwrap();
-
-        let rejected = db.transaction_with(|tx| {
-            tx.execute("INSERT INTO inventory VALUES (1)", [])
-                .map_err(|_| Rejected)?;
-            Err::<(), _>(Rejected)
-        });
-        assert!(matches!(
-            rejected,
-            Err(crate::TransactionError::Operation(Rejected))
-        ));
-
-        db.transaction(|tx| {
-            tx.execute("INSERT INTO inventory VALUES (2)", [])
-                .map(|_| ())
-        })
-        .unwrap();
-        let count = db
-            .writer
-            .query_row("SELECT count(*) FROM inventory", [], |row| {
-                row.get::<_, u32>(0)
-            })
-            .unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn truncate_checkpoint_and_auto_vacuum_preserve_every_cut() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("source.sqlite");
-        let initial = Connection::open(&path).unwrap();
-        initial
-            .execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;")
-            .unwrap();
-        drop(initial);
-        let mut db = Db::open(&path, Limits::default()).unwrap();
-        db.capture.truncate_page_n = 20;
-        db.capture.min_checkpoint_page_n = 10;
-        let mut segments = Vec::new();
-        let mut last_pages = 0;
-        let mut shrank = false;
-        let mut multiple_cuts = false;
-        for round in 0..6 {
-            db.transaction(|tx| {
-                tx.execute("CREATE TABLE IF NOT EXISTS t (data BLOB)", [])?;
-                if round % 2 == 0 {
-                    for _ in 0..80 {
-                        tx.execute("INSERT INTO t VALUES (randomblob(8000))", [])?;
-                    }
-                } else {
-                    tx.execute("DELETE FROM t", [])?;
-                }
-                Ok(())
-            })
-            .unwrap();
-            let batch = db.capture().unwrap();
-            multiple_cuts |= batch.segments.len() > 1;
-            for segment in &batch.segments {
-                shrank |= last_pages > segment.info().database_pages;
-                last_pages = segment.info().database_pages;
-            }
-            segments.extend(batch.segments);
-            let plan =
-                crate::VerifiedPlan::new(&segments, batch.position, Limits::default()).unwrap();
-            let restored = temp.path().join(format!("restored-{round}.sqlite"));
-            crate::restore_exact(&plan, &restored).unwrap();
-            let conn = Connection::open(&restored).unwrap();
-            let check: String = conn
-                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(check, "ok");
-            let count: u32 = conn
-                .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, if round % 2 == 0 { 80 } else { 0 });
-            crate::compact_exact(&plan, &temp.path().join(format!("compacted-{round}.ltx")))
-                .unwrap();
-        }
-        assert!(shrank);
-        assert!(multiple_cuts);
-    }
-}
+mod tests;

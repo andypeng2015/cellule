@@ -10,21 +10,22 @@ From the workspace root:
 
 ```sh
 cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example carts --locked
-cargo run -p cellule-app --example notifications --locked
-cargo run -p cellule-app --example fulfillment --locked
-cargo run -p cellule-app --example invoices --locked
+cargo run -p cellule-app --example authoring --locked
 cargo +1.97.0 check --workspace --all-targets --locked
-cargo test --workspace --locked
+cargo test --workspace --all-features --locked
 cargo test -p cellule-ltx --features replica --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
 python3 scripts/check-boundaries.py
+python3 scripts/check-cell-ltx-layout.py
+python3 scripts/check-doc-rust-fences.py
 node crates/cellule-runtime/docs/validate.mjs
 ```
 
-Use a Cargo target directory outside the checkout if local disk space is limited. The [reference application smoke](docs/quickstart.md#run-the-reference-application) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
+On Crab workstations, always set `CARGO_TARGET_DIR` beneath the mounted
+`$HOME/Workspace/crabbuild-target`, with a unique directory per checkout. Use CI
+or a dedicated verification snapshot for broad suites and process tests. The [reference application smoke](docs/quickstart.md#run-the-reference-application) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
 
 ## Change boundaries
 

@@ -1,5 +1,6 @@
 // Contains adapted Celld lib.rs types at the revision in UPSTREAM.md.
 // Apache-2.0; modified by Crab contributors. See LICENSE.
+//! Shared LTX types: positions, limits, segment info, and read origins.
 
 use std::path::{Path, PathBuf};
 
@@ -9,17 +10,24 @@ use crate::{LtxError, Result};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct Position {
+    /// Transaction id of the commit this position names.
     pub txid: u64,
+    /// Post-apply checksum that commit published.
     pub checksum: u64,
 }
 
 /// Admission bounds for local capture and recovery, not an RSS quota.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Largest database file local capture and recovery admit.
     pub max_database_bytes: u64,
+    /// Largest single capture admitted, across every cut it publishes.
     pub max_capture_bytes: u64,
+    /// Largest immutable LTX file admitted.
     pub max_file_bytes: u64,
+    /// Largest recovery plan admitted.
     pub max_plan_bytes: u64,
+    /// Largest number of segments one plan may reference.
     pub max_segments: usize,
 }
 
@@ -56,17 +64,26 @@ impl Limits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct SegmentInfo {
+    /// First transaction id the segment contains.
     pub min_txid: u64,
+    /// Last transaction id the segment contains.
     pub max_txid: u64,
+    /// SQLite page size the segment was captured with.
     pub page_size: u32,
+    /// Database page count after the segment's commit.
     pub database_pages: u32,
+    /// Checksum the database carried before the segment was applied.
     pub pre_checksum: u64,
+    /// Checksum the segment published.
     pub post_checksum: u64,
+    /// Exact byte length of the immutable segment file.
     pub size_bytes: u64,
+    /// BLAKE3 digest of the immutable segment file.
     pub blake3: [u8; 32],
 }
 
 impl SegmentInfo {
+    /// Returns the position this segment publishes.
     #[must_use]
     pub fn position(&self) -> Position {
         Position {
@@ -75,7 +92,7 @@ impl SegmentInfo {
         }
     }
 
-    #[cfg_attr(not(feature = "replica"), expect(dead_code))]
+    #[cfg(all(test, feature = "replica"))]
     pub(crate) fn from_decoded(bytes: &[u8], file: &crate::ltx::DecodedFile) -> Self {
         Self::from_inspected(file, bytes.len() as u64, *blake3::hash(bytes).as_bytes())
     }
@@ -118,6 +135,7 @@ impl std::fmt::Debug for LocalSegment {
 }
 
 impl LocalSegment {
+    /// Binds a caller-selected local file to the expectations it must satisfy.
     #[must_use]
     pub fn new(path: PathBuf, info: SegmentInfo) -> Self {
         Self {
@@ -127,10 +145,12 @@ impl LocalSegment {
             captured_index: None,
         }
     }
+    /// Returns the local path of the segment file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Returns the manifest expectations the file must satisfy.
     #[must_use]
     pub fn info(&self) -> &SegmentInfo {
         &self.info
@@ -151,8 +171,11 @@ impl LocalSegment {
 /// All cuts produced by one capture, including checkpoint-boundary cuts.
 #[derive(Debug, Clone)]
 pub struct CaptureBatch {
+    /// Immutable cuts the capture published, in lineage order.
     pub segments: Vec<LocalSegment>,
+    /// Position the batch's last cut publishes.
     pub position: Position,
+    /// Bounded observations recorded while capturing.
     pub timing: CaptureTiming,
 }
 
@@ -291,7 +314,13 @@ impl CaptureTiming {
 
 // Derived from Celld's position types; private to the imported codec/engine.
 pub(crate) type Checksum = u64;
-pub(crate) const CHECKSUM_FLAG: u64 = 1 << 63;
+/// High bit LTX sets on every checksum it publishes.
+///
+/// The flag is part of the wire format: it distinguishes a rolled checksum from
+/// the zero value, so every reader that accepts an LTX checksum (including the
+/// Cell runtime's control validation) must test the same bit. Exported so the
+/// flag has one definition across the crate boundary.
+pub const CHECKSUM_FLAG: u64 = 1 << 63;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub(crate) struct Txid(pub u64);
 impl std::fmt::Display for Txid {

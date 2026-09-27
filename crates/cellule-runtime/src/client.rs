@@ -1,3 +1,4 @@
+//! Client-side Cell envelopes and the connection that carries them to the owner.
 use std::{
     collections::HashMap,
     fmt,
@@ -13,14 +14,21 @@ use std::{
 
 use cellule_ltx::rusqlite::OptionalExtension;
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 
-use crate::{
-    ActivityContext, ActivityExecution, ActivitySupport, CatalogRole, CellHandle, CellId,
-    CellTarget, Command, CommandInvocation, Digest, Error, IncarnationId, MutationIdentity,
-    OperationDescriptor, Query, QueryInvocation, Registry, RequestId, Resolution, Result,
-    StoredOutcome,
-    codec::{decode_wire, encode_wire},
+use crate::cell::actor::CellHandle;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
+use crate::codec::{decode_wire, encode_wire};
+use crate::fleet::telemetry::{
+    CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
 };
+use crate::identity::{CellId, CellTarget, Digest, IncarnationId, RequestId};
+use crate::primitives::workflow::{ActivityContext, ActivityExecution, ActivitySupport};
+use crate::registry::{
+    Command, CommandInvocation, OperationDescriptor, Query, QueryInvocation, Registry,
+};
+use crate::{Error, Result};
 
 const CELL_COMMAND_TAG: u16 = 10;
 const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
@@ -28,34 +36,76 @@ const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 #[cfg(test)]
 mod tests;
 
+mod backpressure;
+mod local;
+mod replica;
+mod routing;
+mod runtime;
+
+pub use replica::CellReadReplica;
+pub use routing::ReplicaReadRouter;
+
+pub use local::command_operation_digest;
+pub(crate) use local::{
+    LocalCellTransport, decode_pending, encoded_command_operation_digest, local_description,
+    next_metadata, receipt, validate_description,
+};
+use local::{decode_output, unix_time_ms, validate_minimum};
+pub use runtime::LocalCellResolver;
+use runtime::{RuntimeCellTransport, RuntimeLocalResolver};
+
+/// Execution policy for typed queries on a client capability.
+///
+/// Commands, mutation resolution, state streams and primitive lease validation
+/// always use the owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadPolicy {
+    /// Execute FIFO on the current owner, optionally after a receipt.
+    #[default]
+    CurrentOwner,
+    /// Execute on an admitted snapshot, failing if no reader proves the minimum.
+    Replica,
+}
+
 /// Immutable owner metadata used to fence a routed invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellDescription {
+    /// Cell the description belongs to.
     pub cell: CellId,
+    /// Incarnation that currently owns the Cell.
     pub incarnation: IncarnationId,
+    /// Application code digest the owner installed.
     pub code: Digest,
+    /// Schema version the owner installed.
     pub schema: u32,
 }
 
 /// Durable observation position returned with every typed result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Receipt {
+    /// Cell the observation came from.
     pub cell: CellId,
+    /// Incarnation that produced it.
     pub incarnation: IncarnationId,
+    /// Highest committed sequence the result observed.
     pub commit_sequence: u64,
 }
 
 /// Typed command result released only after authoritative publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Committed<T> {
+    /// Typed command output.
     pub output: T,
+    /// Publication receipt the output can be observed at.
     pub receipt: Receipt,
 }
 
 /// Typed read result and the exact SQLite position it observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observed<T> {
+    /// Typed read output.
     pub output: T,
+    /// Position the read observed.
     pub receipt: Receipt,
 }
 
@@ -227,21 +277,25 @@ pub struct PendingMutation {
 }
 
 impl PendingMutation {
+    /// Returns the identity that resolves this mutation.
     #[must_use]
     pub const fn identity(&self) -> MutationIdentity {
         self.identity
     }
 
+    /// Returns the digest of the operation that was submitted.
     #[must_use]
     pub const fn operation_digest(&self) -> Digest {
         self.operation_digest
     }
 
+    /// Returns the incarnation the mutation targeted.
     #[must_use]
     pub const fn incarnation(&self) -> IncarnationId {
         self.incarnation
     }
 
+    /// Returns the Cell the mutation targeted.
     #[must_use]
     pub const fn target(&self) -> &CellTarget {
         &self.target
@@ -290,30 +344,68 @@ impl<C: Command> PreparedCommand<C> {
             .validate(now_ms)
             .map_err(InvocationError::NotStarted)?;
         self.request.now_ms = now_ms;
-        match self.client.transport.command(self.request).await {
-            Ok(outcome) => decode_pending::<C::Output>(&self.evidence, outcome),
-            Err(Error::OutcomeUnknown {
-                request_id,
-                operation_digest,
-                ..
-            }) if request_id == self.evidence.identity.request_id
-                && operation_digest == self.evidence.operation_digest =>
-            {
-                Err(InvocationError::Pending(Box::new(self.evidence)))
-            }
-            Err(error) => Err(InvocationError::NotStarted(error)),
+        let span = tracing::debug_span!(
+            target: "cellule_runtime::action",
+            "cell_invocation",
+            cell = ?self.request.expected.cell,
+            incarnation = ?self.request.expected.incarnation,
+            mutation_request_id = ?self.request.identity.request_id,
+            module = C::MODULE,
+            operation_id = C::ID,
+        );
+        async move {
+            let started = Instant::now();
+            tracing::debug!(target: "cellule_runtime::action", event = "cell_invocation_started");
+            let result = match self.client.transport.command(self.request).await {
+                Ok(outcome) => decode_pending::<C::Output>(&self.evidence, outcome),
+                Err(Error::OutcomeUnknown {
+                    request_id,
+                    operation_digest,
+                    ..
+                }) if request_id == self.evidence.identity.request_id
+                    && operation_digest == self.evidence.operation_digest =>
+                {
+                    Err(InvocationError::Pending(Box::new(self.evidence)))
+                }
+                Err(error) => Err(InvocationError::NotStarted(error)),
+            };
+            let (outcome, receipt) = match &result {
+                Ok(committed) => ("committed", Some(committed.receipt)),
+                Err(InvocationError::Rejected(committed)) => ("rejected", Some(committed.receipt)),
+                Err(InvocationError::InvalidPublishedResult { receipt, .. }) => {
+                    ("invalid_result", Some(*receipt))
+                }
+                Err(InvocationError::Pending(_)) => ("pending", None),
+                Err(InvocationError::NotStarted(_)) => ("not_started", None),
+            };
+            tracing::debug!(
+                target: "cellule_runtime::action",
+                event = "cell_invocation_completed",
+                outcome,
+                commit_sequence = receipt.map(|receipt| receipt.commit_sequence),
+                elapsed_us = started.elapsed().as_micros(),
+            );
+            result
         }
+        .instrument(span)
+        .await
     }
 }
 
 /// Outcome-aware typed invocation failure.
 pub enum InvocationError<T> {
+    /// The command committed a rejection; the committed value carries it.
     Rejected(Box<Committed<T>>),
+    /// The command may have committed; resolve the mutation before retrying.
     Pending(Box<PendingMutation>),
+    /// The published result could not be decoded.
     InvalidPublishedResult {
+        /// Receipt the published result was observed at.
         receipt: Receipt,
+        /// Decoding failure that produced this error.
         source: Box<Error>,
     },
+    /// The invocation failed before it was submitted.
     NotStarted(Error),
 }
 
@@ -378,6 +470,7 @@ pub(super) struct EncodedCommand {
 }
 
 /// Owned encoded query accepted by a local or authenticated peer transport.
+#[derive(Clone)]
 pub(super) struct EncodedQuery {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -392,6 +485,7 @@ pub(super) struct EncodedQuery {
 }
 
 /// Owned request-ledger lookup accepted by a routed transport.
+#[derive(Clone)]
 pub(super) struct EncodedResolve {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -435,7 +529,10 @@ pub(super) trait CellTransport: Send + Sync + 'static {
 pub struct CellClient {
     registry: Arc<Registry>,
     transport: Arc<dyn CellTransport>,
+    observed_description: Option<CellDescription>,
     blob_artifact_store: Option<crate::BlobArtifactStore>,
+    read_policy: ReadPolicy,
+    replicas: Option<Arc<routing::ReplicaClient>>,
 }
 
 impl CellClient {
@@ -444,8 +541,90 @@ impl CellClient {
         Self {
             registry,
             transport,
+            observed_description: None,
             blob_artifact_store: None,
+            read_policy: ReadPolicy::CurrentOwner,
+            replicas: None,
         }
+    }
+
+    /// Returns a capability with bounded waiting for owner capacity refusals.
+    ///
+    /// Clones share request and retained-input limits. Full client admission
+    /// still fails immediately. Mailbox work queues in FIFO order per Cell;
+    /// Describe uses shared client bounds only. Cells remain independent.
+    /// Only capacity refusals are retried; ambiguous commands require resolution.
+    /// The wait bound never cancels an accepted attempt. Replica reads retain
+    /// separate admission.
+    pub fn with_admission_backpressure(
+        &self,
+        requests: usize,
+        bytes: usize,
+        max_wait: std::time::Duration,
+    ) -> Result<Self> {
+        let mut client = self.clone();
+        client.transport = Arc::new(backpressure::BackpressureTransport::new(
+            self.transport.clone(),
+            requests,
+            bytes,
+            max_wait,
+        )?);
+        Ok(client)
+    }
+
+    /// Wires replica placement and authenticated execution at the host boundary.
+    ///
+    /// The peer registry must match this client's compiled application. Share
+    /// the router across callers; optionally supply this node's admitted local
+    /// snapshot resolver to avoid self-dials. Query policy remains unchanged.
+    pub fn with_read_replicas(
+        &self,
+        router: ReplicaReadRouter,
+        peer: crate::peer::ReplicaPeerClient,
+        local: Option<(crate::SessionId, Arc<dyn crate::peer::PeerReplicaResolver>)>,
+    ) -> Result<Self> {
+        if peer.registry().release_digest() != self.registry.release_digest() {
+            return Err(Error::Registry(
+                "replica client registry differs from owner client",
+            ));
+        }
+        let mut client = self.clone();
+        client.replicas = Some(Arc::new(routing::ReplicaClient {
+            router,
+            peer,
+            local,
+        }));
+        Ok(client)
+    }
+
+    /// Returns a capability using the explicit policy for typed queries only.
+    ///
+    /// Replica queries without host wiring fail with `ReplicaUnavailable`;
+    /// they never fall back to the owner. Commands, streams and primitive lease
+    /// validation retain owner order.
+    #[must_use]
+    pub fn with_read_policy(&self, policy: ReadPolicy) -> Self {
+        let mut client = self.clone();
+        client.read_policy = policy;
+        client
+    }
+
+    /// Returns the compiled registry identity used to encode typed calls.
+    #[must_use]
+    pub fn registry_digest(&self) -> Digest {
+        self.registry.release_digest()
+    }
+
+    /// Binds this client to an already observed Cell contract for a routed request.
+    ///
+    /// The host supplies a description read from authority or the owner. Calls
+    /// skip Describe and must target this exact Cell. Receiver authorization,
+    /// contract validation, and actor admission still apply; stale observations
+    /// refuse execution and require the host to resolve a fresh route.
+    #[must_use]
+    pub fn with_observed_description(mut self, description: CellDescription) -> Self {
+        self.observed_description = Some(description);
+        self
     }
 
     /// Returns a client clone wired to the configured object-store Blob data.
@@ -463,11 +642,23 @@ impl CellClient {
     /// Builds the canonical single-owner transport used by embedded routes.
     #[must_use]
     pub fn local(registry: Arc<Registry>, handle: CellHandle) -> Self {
+        Self::local_with_telemetry(registry, handle, CellTelemetryHandle::default())
+    }
+
+    /// Builds the canonical single-owner transport with primitive-operation
+    /// telemetry reported from the executing thread.
+    #[must_use]
+    pub fn local_with_telemetry(
+        registry: Arc<Registry>,
+        handle: CellHandle,
+        telemetry: CellTelemetryHandle,
+    ) -> Self {
         let primary = handle.clone();
         let transport = Arc::new(LocalCellTransport {
             registry: registry.clone(),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle)])),
             handle: primary,
+            telemetry,
         });
         Self::new(registry, transport)
     }
@@ -480,6 +671,16 @@ impl CellClient {
     pub fn local_many(
         registry: Arc<Registry>,
         handles: impl IntoIterator<Item = CellHandle>,
+    ) -> Result<Self> {
+        Self::local_many_with_telemetry(registry, handles, CellTelemetryHandle::default())
+    }
+
+    /// Builds a bounded in-process transport with primitive-operation telemetry
+    /// reported from the executing thread.
+    pub fn local_many_with_telemetry(
+        registry: Arc<Registry>,
+        handles: impl IntoIterator<Item = CellHandle>,
+        telemetry: CellTelemetryHandle,
     ) -> Result<Self> {
         let mut local = HashMap::new();
         for handle in handles {
@@ -501,17 +702,66 @@ impl CellClient {
                 registry,
                 handles: Arc::new(local),
                 handle: primary,
+                telemetry,
             }),
         ))
+    }
+
+    /// Routes to any Cell currently owned by this local runtime.
+    ///
+    /// The catalog and authority are checked for each invocation. This does
+    /// not acquire an idle Cell or forward to another node; callers must
+    /// arrange ownership before sending an operation.
+    #[must_use]
+    pub fn local_runtime(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+    ) -> Self {
+        let transport = Arc::new(RuntimeCellTransport::new(registry.clone(), runtime, layout));
+        Self::new(registry, transport)
+    }
+
+    /// Routes a target to its current local owner or an authenticated peer.
+    ///
+    /// Every invocation rechecks catalog and authority state. The peer round
+    /// trip must resolve the current remote owner and verify its enrollment;
+    /// this constructor does not acquire an idle Cell.
+    #[must_use]
+    pub fn runtime_with_peer(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+        signer: Arc<crate::peer::PeerSigner>,
+        principal: crate::peer::PeerPrincipal,
+        round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
+    ) -> Self {
+        Self::peer(registry, signer, principal, round_trip)
+            .with_local_resolver(Arc::new(RuntimeLocalResolver { runtime, layout }))
+    }
+
+    /// Resolves a local owner before delegating to this client's transport.
+    ///
+    /// The resolver owns product placement and admission policy. It runs before
+    /// describe, command, query, and resolution; errors never dispatch remotely.
+    /// Configure admission backpressure afterward so it bounds both routes.
+    #[must_use]
+    pub fn with_local_resolver(mut self, resolver: Arc<dyn LocalCellResolver>) -> Self {
+        self.transport = Arc::new(RuntimeCellTransport::with_resolver(
+            self.registry.clone(),
+            resolver,
+            self.transport,
+        ));
+        self
     }
 
     /// Builds a typed capability over authenticated private peer routing.
     #[must_use]
     pub fn peer(
         registry: Arc<Registry>,
-        signer: Arc<crate::PeerSigner>,
-        principal: crate::PeerPrincipal,
-        round_trip: Arc<dyn crate::PeerRoundTrip>,
+        signer: Arc<crate::peer::PeerSigner>,
+        principal: crate::peer::PeerPrincipal,
+        round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
     ) -> Self {
         let transport = Arc::new(crate::peer::PeerClientTransport::new(
             signer, principal, round_trip,
@@ -602,7 +852,7 @@ impl CellClient {
         activity: &str,
         context: ActivityContext,
         input: Vec<u8>,
-        blocking: Option<crate::BlockingActivityReservation>,
+        blocking: Option<crate::primitives::activity_pool::BlockingActivityReservation>,
     ) -> Result<ActivityExecution> {
         self.registry
             .execute_activity(module, definition, activity, context, input, blocking)
@@ -631,6 +881,7 @@ impl CellClient {
         identity: MutationIdentity,
         input: C::Input,
     ) -> std::result::Result<PreparedCommand<C>, InvocationError<C::Output>> {
+        let started = Instant::now();
         let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         identity
             .validate(now_ms)
@@ -660,6 +911,16 @@ impl CellClient {
             input_limit: operation.input_limit,
             output_limit: operation.output_limit,
         };
+        tracing::debug!(
+            target: "cellule_runtime::action",
+            event = "cell_command_prepared",
+            cell = ?description.cell,
+            incarnation = ?description.incarnation,
+            mutation_request_id = ?identity.request_id,
+            module = C::MODULE,
+            operation_id = C::ID,
+            elapsed_us = started.elapsed().as_micros(),
+        );
         Ok(PreparedCommand {
             client: self.clone(),
             request,
@@ -674,13 +935,38 @@ impl CellClient {
         })
     }
 
-    /// Runs one typed FIFO read at or beyond an optional receipt.
+    /// Runs a typed query under this capability's policy at or beyond a receipt.
+    ///
+    /// The default policy executes FIFO on the owner; explicit replica reads
+    /// return their actual snapshot position or fail closed.
     pub async fn query<Q: Query>(
         &self,
         target: &CellTarget,
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
+        if self.read_policy == ReadPolicy::Replica {
+            let replicas = self
+                .replicas
+                .as_ref()
+                .ok_or(InvocationError::NotStarted(Error::ReplicaUnavailable))?;
+            let local = replicas
+                .local
+                .as_ref()
+                .map(|(session, resolver)| (*session, resolver.as_ref()));
+            // Placement and replica admission carry large I/O futures. Keep
+            // that optional state off every caller's owner-query stack frame.
+            return Box::pin(replicas.router.query::<Q>(
+                &replicas.peer,
+                local,
+                target,
+                minimum,
+                input,
+            ))
+            .await
+            .map(|(observed, _)| observed)
+            .map_err(InvocationError::NotStarted);
+        }
         let description = self.describe::<Q::Output>(target).await?;
         self.query_with_description::<Q>(target, description, minimum, input)
             .await
@@ -765,11 +1051,14 @@ impl CellClient {
         &self,
         target: &CellTarget,
     ) -> std::result::Result<CellDescription, InvocationError<T>> {
-        let description = self
-            .transport
-            .describe(target.clone())
-            .await
-            .map_err(InvocationError::NotStarted)?;
+        let description = match self.observed_description {
+            Some(description) => description,
+            None => self
+                .transport
+                .describe(target.clone())
+                .await
+                .map_err(InvocationError::NotStarted)?,
+        };
         if description.cell != target.cell_id() {
             return Err(InvocationError::NotStarted(Error::Command(
                 "transport described a different Cell",
@@ -777,323 +1066,4 @@ impl CellClient {
         }
         Ok(description)
     }
-}
-
-pub(super) struct LocalCellTransport {
-    pub(super) registry: Arc<Registry>,
-    pub(super) handles: Arc<HashMap<CellId, CellHandle>>,
-    pub(super) handle: CellHandle,
-}
-
-impl CellTransport for LocalCellTransport {
-    fn describe(
-        &self,
-        target: CellTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<CellDescription>> + Send + 'static>> {
-        let handles = Arc::clone(&self.handles);
-        Box::pin(async move {
-            let handle = local_handle(&handles, &target)?;
-            validate_local_target(&handle, &target)?;
-            Ok(local_description(&handle))
-        })
-    }
-
-    fn command(
-        &self,
-        command: EncodedCommand,
-    ) -> Pin<Box<dyn Future<Output = Result<StoredOutcome>> + Send + 'static>> {
-        let registry = self.registry.clone();
-        let handles = Arc::clone(&self.handles);
-        Box::pin(async move {
-            let handle = local_handle(&handles, &command.target)?;
-            validate_local_target(&handle, &command.target)?;
-            validate_expected(&handle, command.expected)?;
-            if command.input.len() > command.input_limit as usize {
-                return Err(Error::Command("encoded command input exceeds limit"));
-            }
-            let schema = handle.schema();
-            let input_bytes = command.input.len();
-            let output_limit = command.output_limit as usize;
-            handle
-                .execute(
-                    command.identity,
-                    command.operation_digest,
-                    command.now_ms,
-                    input_bytes,
-                    output_limit,
-                    move |transaction| {
-                        let sequence = next_sequence(transaction)?;
-                        registry.execute_command_with_issue_time(
-                            transaction,
-                            CommandInvocation {
-                                module: command.module,
-                                operation_id: command.operation_id,
-                                codec_version: command.codec_version,
-                                schema,
-                                target: command.target.clone(),
-                                sequence,
-                                now_ms: command.now_ms,
-                                input: &command.input,
-                            },
-                            command.identity.issued_at_ms,
-                        )
-                    },
-                )
-                .await
-        })
-    }
-
-    fn query(
-        &self,
-        query: EncodedQuery,
-    ) -> Pin<Box<dyn Future<Output = Result<EncodedObservation>> + Send + 'static>> {
-        let registry = self.registry.clone();
-        let handles = Arc::clone(&self.handles);
-        Box::pin(async move {
-            let handle = local_handle(&handles, &query.target)?;
-            validate_local_target(&handle, &query.target)?;
-            validate_expected(&handle, query.expected)?;
-            validate_minimum(query.expected, query.minimum)?;
-            if query.input.len() > query.input_limit as usize {
-                return Err(Error::Command("encoded query input exceeds limit"));
-            }
-            let sequence = Arc::new(AtomicU64::new(0));
-            let observed_sequence = sequence.clone();
-            let cell = handle.cell_id();
-            let schema = handle.schema();
-            let input_bytes = query.input.len();
-            let output_limit = query.output_limit as usize;
-            let output = handle
-                .query(input_bytes, output_limit, move |connection| {
-                    let commit_sequence = current_sequence(connection)?;
-                    observed_sequence.store(commit_sequence, Ordering::Release);
-                    registry.execute_query(
-                        connection,
-                        QueryInvocation {
-                            module: query.module,
-                            operation_id: query.operation_id,
-                            codec_version: query.codec_version,
-                            schema,
-                            cell,
-                            commit_sequence,
-                            now_ms: query.now_ms,
-                            input: &query.input,
-                        },
-                    )
-                })
-                .await?;
-            let commit_sequence = sequence.load(Ordering::Acquire);
-            if query
-                .minimum
-                .is_some_and(|minimum| commit_sequence < minimum.commit_sequence)
-            {
-                return Err(Error::Command("query did not satisfy minimum receipt"));
-            }
-            Ok(EncodedObservation {
-                output,
-                receipt: receipt(query.expected, commit_sequence),
-            })
-        })
-    }
-
-    fn resolve(
-        &self,
-        resolve: EncodedResolve,
-    ) -> Pin<Box<dyn Future<Output = Result<Resolution>> + Send + 'static>> {
-        let handles = Arc::clone(&self.handles);
-        Box::pin(async move {
-            let handle = local_handle(&handles, &resolve.target)?;
-            validate_local_target(&handle, &resolve.target)?;
-            validate_expected(&handle, resolve.expected)?;
-            handle
-                .resolve(
-                    resolve.identity,
-                    resolve.operation_digest,
-                    resolve.now_ms,
-                    resolve.max_result_bytes,
-                )
-                .await
-        })
-    }
-}
-
-fn local_handle(handles: &HashMap<CellId, CellHandle>, target: &CellTarget) -> Result<CellHandle> {
-    handles
-        .get(&target.cell_id())
-        .cloned()
-        .ok_or(Error::Control("target Cell is not locally owned"))
-}
-
-/// Computes a typed command digest from validated metadata and encoded input.
-pub fn command_operation_digest<C: Command>(
-    description: CellDescription,
-    identity: MutationIdentity,
-    input: &[u8],
-) -> Result<Digest> {
-    encoded_command_operation_digest(description, identity, C::ID, C::CODEC_VERSION, input)
-}
-
-pub(super) fn encoded_command_operation_digest(
-    description: CellDescription,
-    identity: MutationIdentity,
-    operation_id: u32,
-    codec_version: u32,
-    input: &[u8],
-) -> Result<Digest> {
-    let input_len = u32::try_from(input.len())
-        .map_err(|_| Error::Command("command input exceeds canonical digest range"))?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab.op.v1\0");
-    hasher.update(description.cell.as_bytes());
-    hasher.update(description.incarnation.as_bytes());
-    hasher.update(identity.request_id.as_bytes());
-    hasher.update(&identity.issued_at_ms.to_be_bytes());
-    hasher.update(&identity.expires_at_ms.to_be_bytes());
-    hasher.update(&CELL_COMMAND_TAG.to_be_bytes());
-    hasher.update(&operation_id.to_be_bytes());
-    hasher.update(&codec_version.to_be_bytes());
-    hasher.update(&input_len.to_be_bytes());
-    hasher.update(input);
-    Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
-}
-
-fn decode_output<T: crate::WireValue>(
-    result: &[u8],
-    limit: u32,
-) -> std::result::Result<T, InvocationError<T>> {
-    decode_wire(result, limit)
-        .map_err(Error::from)
-        .map_err(InvocationError::NotStarted)
-}
-
-fn decode_committed<T: crate::WireValue>(
-    result: &[u8],
-    limit: u32,
-    receipt: Receipt,
-) -> std::result::Result<Committed<T>, InvocationError<T>> {
-    let output =
-        decode_wire(result, limit).map_err(|error| InvocationError::InvalidPublishedResult {
-            receipt,
-            source: Box::new(Error::from(error)),
-        })?;
-    Ok(Committed { output, receipt })
-}
-
-pub(crate) fn decode_pending<T: crate::WireValue>(
-    pending: &PendingMutation,
-    outcome: StoredOutcome,
-) -> std::result::Result<Committed<T>, InvocationError<T>> {
-    let limit = u32::try_from(pending.max_result_bytes).map_err(|_| {
-        InvocationError::NotStarted(Error::Command("pending result limit overflow"))
-    })?;
-    let decode = |result: Vec<u8>, commit_sequence| {
-        decode_committed(
-            &result,
-            limit,
-            Receipt {
-                cell: pending.target.cell_id(),
-                incarnation: pending.incarnation,
-                commit_sequence,
-            },
-        )
-    };
-    match outcome {
-        StoredOutcome::Success {
-            result,
-            commit_sequence,
-        } => decode(result, commit_sequence),
-        StoredOutcome::Rejected {
-            result,
-            commit_sequence,
-        } => Err(InvocationError::Rejected(Box::new(decode(
-            result,
-            commit_sequence,
-        )?))),
-    }
-}
-
-fn validate_description(
-    registry: &Registry,
-    module: &str,
-    description: CellDescription,
-    operation: OperationDescriptor,
-) -> Result<()> {
-    if !registry.supports_module_code(module, description.code, description.schema) {
-        return Err(Error::Command("Cell code does not match operation module"));
-    }
-    if !(operation.schema_min..=operation.schema_max).contains(&description.schema) {
-        return Err(Error::Command(
-            "registered operation does not support Cell schema",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_minimum(description: CellDescription, minimum: Option<Receipt>) -> Result<()> {
-    if minimum.is_some_and(|minimum| {
-        minimum.cell != description.cell || minimum.incarnation != description.incarnation
-    }) {
-        return Err(Error::Command("minimum receipt does not match Cell"));
-    }
-    Ok(())
-}
-
-fn validate_local_target(handle: &CellHandle, target: &CellTarget) -> Result<()> {
-    let entry = handle.catalog().entry();
-    if target.cell_id() != handle.cell_id()
-        || target.namespace() != entry.namespace()
-        || target.partition() != entry.partition()
-    {
-        return Err(Error::Command("target does not match active Cell"));
-    }
-    Ok(())
-}
-
-fn validate_expected(handle: &CellHandle, expected: CellDescription) -> Result<()> {
-    if local_description(handle) != expected {
-        return Err(Error::Fenced);
-    }
-    Ok(())
-}
-
-pub(super) fn local_description(handle: &CellHandle) -> CellDescription {
-    CellDescription {
-        cell: handle.cell_id(),
-        incarnation: handle.incarnation(),
-        code: handle.code(),
-        schema: handle.schema(),
-    }
-}
-
-fn next_sequence(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<u64> {
-    current_sequence(transaction)?
-        .checked_add(1)
-        .ok_or(Error::Command("commit sequence overflow"))
-}
-
-fn current_sequence(connection: &cellule_ltx::rusqlite::Connection) -> Result<u64> {
-    let sequence = connection
-        .query_row(
-            "SELECT commit_sequence FROM sys_meta WHERE singleton = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .ok_or(Error::Command("runtime metadata row missing"))?;
-    u64::try_from(sequence).map_err(|_| Error::Command("invalid commit sequence"))
-}
-
-pub(super) fn receipt(description: CellDescription, commit_sequence: u64) -> Receipt {
-    Receipt {
-        cell: description.cell,
-        incarnation: description.incarnation,
-        commit_sequence,
-    }
-}
-
-fn unix_time_ms() -> Result<i64> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::Command("system clock precedes Unix epoch"))?;
-    i64::try_from(duration.as_millis()).map_err(|_| Error::Command("system clock overflow"))
 }

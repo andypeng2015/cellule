@@ -1,5 +1,6 @@
 // Derived from denoland/celld, commit 10cb1303dac710dcb3b557e318e08c855261f68b.
 // Apache-2.0; see LICENSE and UPSTREAM.md. Modified by Crab contributors.
+//! Synchronous capture of sealed SQLite cuts into LTX frames.
 
 use crate::error::{LtxError, Result};
 use crate::ltx::{self, lock_pgno};
@@ -11,17 +12,25 @@ use crate::{
 use rusqlite::Connection;
 
 mod checkpoint;
+mod timing;
 mod verify;
 mod wal;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use timing::*;
 
+/// SQLite checkpoint mode a capture requests when its WAL bound is exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointMode {
+    /// Checkpoints without waiting for readers or writers.
     Passive,
+    /// Waits for readers and writers so every frame can move.
     Full,
+    /// Like `Full`, and restarts readers still reading from the WAL.
     Restart,
+    /// Like `Restart`, and truncates the WAL to zero frames afterwards.
     Truncate,
 }
 
@@ -59,8 +68,7 @@ const RELATIVE_TRUNCATE_PAGES: u32 = 1024;
 struct LastL0Header {
     wal_offset: i64,
     wal_size: i64,
-    wal_salt1: u32,
-    wal_salt2: u32,
+    wal_salts: Option<(u32, u32)>,
     commit: u32,
     final_pgno: u32,
     final_page: Vec<u8>,
@@ -80,133 +88,6 @@ pub(crate) enum TimingPhase {
     Fsync,
     ParentSync,
     Checkpoint,
-}
-
-pub(crate) struct TimingRecorder {
-    started: Instant,
-    active: Option<(TimingPhase, Instant)>,
-    timing: crate::CaptureTiming,
-}
-
-impl TimingRecorder {
-    pub(crate) fn new(started: Instant) -> Self {
-        Self {
-            started,
-            active: None,
-            timing: crate::CaptureTiming::default(),
-        }
-    }
-
-    pub(crate) fn begin(&mut self, phase: TimingPhase, now: Instant) {
-        if let Some((active, started)) = self.active.take() {
-            self.add_phase(active, now.saturating_duration_since(started));
-        }
-        self.active = Some((phase, now));
-    }
-
-    pub(crate) fn end(&mut self, phase: TimingPhase, now: Instant) {
-        if let Some((active, started)) = self.active
-            && active == phase
-        {
-            self.add_phase(active, now.saturating_duration_since(started));
-            self.active = None;
-        }
-    }
-
-    pub(crate) fn add_wal_bytes(&mut self, bytes: u64) {
-        self.timing.wal_bytes = self.timing.wal_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_database_bytes(&mut self, bytes: u64) {
-        self.timing.database_bytes = self.timing.database_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_ltx_bytes(&mut self, bytes: u64) {
-        self.timing.ltx_bytes = self.timing.ltx_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_segment(&mut self) {
-        self.timing.segment_count = self.timing.segment_count.saturating_add(1);
-    }
-
-    pub(crate) fn add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
-        self.add_phase(phase, Duration::from_nanos(elapsed));
-    }
-
-    pub(crate) fn observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
-        if sparse {
-            self.timing.wal_sparse_reads = self.timing.wal_sparse_reads.saturating_add(1);
-        } else {
-            self.timing.wal_full_reads = self.timing.wal_full_reads.saturating_add(1);
-        }
-        if fallback {
-            self.timing.wal_fallback_reads = self.timing.wal_fallback_reads.saturating_add(1);
-        }
-        self.timing.wal_image_bytes = self.timing.wal_image_bytes.max(bytes as u64);
-    }
-
-    pub(crate) fn observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
-        self.timing.wal_file_bytes = self.timing.wal_file_bytes.max(file_bytes);
-        self.timing.wal_read_bytes = self.timing.wal_read_bytes.saturating_add(read_bytes);
-    }
-
-    pub(crate) fn observe_wal_snapshot(&mut self) {
-        self.timing.wal_snapshot_reads = self.timing.wal_snapshot_reads.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_run(&mut self) {
-        self.timing.checkpoint_runs = self.timing.checkpoint_runs.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_result(&mut self, busy: bool, frames: i64, backfilled: i64) {
-        self.timing.checkpoint_busy = self.timing.checkpoint_busy.saturating_add(u32::from(busy));
-        self.timing.checkpoint_frames = self
-            .timing
-            .checkpoint_frames
-            .saturating_add(u64::try_from(frames.max(0)).unwrap_or_default());
-        self.timing.checkpoint_backfilled = self
-            .timing
-            .checkpoint_backfilled
-            .saturating_add(u64::try_from(backfilled.max(0)).unwrap_or_default());
-    }
-
-    pub(crate) fn checkpoint_busy_error(&mut self) {
-        self.timing.checkpoint_busy_errors = self.timing.checkpoint_busy_errors.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_restart(&mut self) {
-        self.timing.checkpoint_restarts = self.timing.checkpoint_restarts.saturating_add(1);
-    }
-
-    pub(crate) fn finish(mut self, now: Instant) -> crate::CaptureTiming {
-        if let Some((active, started)) = self.active.take() {
-            self.add_phase(active, now.saturating_duration_since(started));
-        }
-        self.timing.total_nanos = nanos(now.saturating_duration_since(self.started));
-        self.timing
-    }
-
-    fn add_phase(&mut self, phase: TimingPhase, elapsed: Duration) {
-        let target = match phase {
-            TimingPhase::Preparation => &mut self.timing.preparation_nanos,
-            TimingPhase::SchemaCheck => &mut self.timing.schema_check_nanos,
-            TimingPhase::WalExistence => &mut self.timing.wal_existence_nanos,
-            TimingPhase::PositionResolution => &mut self.timing.position_resolution_nanos,
-            TimingPhase::WalRead => &mut self.timing.wal_read_nanos,
-            TimingPhase::PageCollection => &mut self.timing.page_collection_nanos,
-            TimingPhase::Verification => &mut self.timing.verification_nanos,
-            TimingPhase::Encode => &mut self.timing.encode_nanos,
-            TimingPhase::LocalWrite => &mut self.timing.local_write_nanos,
-            TimingPhase::Fsync => &mut self.timing.fsync_nanos,
-            TimingPhase::ParentSync => &mut self.timing.parent_sync_nanos,
-            TimingPhase::Checkpoint => &mut self.timing.checkpoint_nanos,
-        };
-        *target = target.saturating_add(nanos(elapsed));
-    }
-}
-
-fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 pub(crate) struct CaptureEngine {
@@ -231,12 +112,20 @@ pub(crate) struct CaptureEngine {
     checkpointed_wal_offset: i64,
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
-    last_l0_segment: Option<crate::SegmentInfo>,
+    sealed_l0_segments: HashMap<u64, crate::SegmentInfo>,
+    /// Largest one incremental LTX cut may be.
+    ///
+    /// A commit whose delta cannot fit this bound is captured as a full
+    /// database image instead, which is bounded by the host's `max_file_bytes`.
+    /// The commit-time admission in `Db::transaction_with` normally refuses such
+    /// a commit before SQLite publishes it.
+    max_incremental_bytes: u64,
     #[cfg(feature = "replica")]
     sealed_l0_captured_indexes: HashMap<u64, Vec<u8>>,
 
     position: Pos,
     l0_dir_ready: bool,
+    l0_ancestors_durable: bool,
     wal_file: Option<crate::HostFile>,
     timing: Option<TimingRecorder>,
     defer_durability: bool,
@@ -258,6 +147,7 @@ impl CaptureEngine {
         path: impl AsRef<Path>,
         host: crate::LtxHost,
         vfs: Option<&str>,
+        max_incremental_bytes: u64,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let meta_path = Self::meta_path_for(&path);
@@ -323,11 +213,13 @@ impl CaptureEngine {
             checkpointed_wal_offset: 0,
             verified_schema_version: None,
             last_l0_header: None,
-            last_l0_segment: None,
+            sealed_l0_segments: HashMap::new(),
+            max_incremental_bytes,
             #[cfg(feature = "replica")]
             sealed_l0_captured_indexes: HashMap::new(),
             position: Pos::ZERO,
             l0_dir_ready: false,
+            l0_ancestors_durable: false,
             wal_file: None,
             timing: None,
             defer_durability: false,
@@ -358,9 +250,8 @@ impl CaptureEngine {
         // Ensure the meta directory exists (db.go:880-883).
         db.host.create_dir_all(&db.meta_path)?;
 
-        // Ensure the WAL has at least one frame (db.go:886-888).
-        db.ensure_wal_exists()?;
-
+        // Capture creates a WAL frame when needed. Writing it during open would
+        // change a restored root even if the application only reads then closes.
         Ok(db)
     }
 
@@ -385,6 +276,26 @@ impl CaptureEngine {
 
     pub fn ltx_path(&self, level: u32, min_txid: Txid, max_txid: Txid) -> String {
         ltx_file_path(&self.meta_path.to_string_lossy(), level, min_txid, max_txid)
+    }
+
+    /// Seals the directory chain that contains the LTX file's synced name.
+    ///
+    /// Syncing `ltx/0` alone cannot preserve a newly created `0`, `ltx`, or
+    /// session-directory entry after power loss. Later cuts reuse these names.
+    pub(crate) fn sync_l0_ancestors(&mut self) -> Result<()> {
+        if self.l0_ancestors_durable {
+            return Ok(());
+        }
+        let ltx = self.meta_path.join("ltx");
+        let l0 = ltx.join("0");
+        self.timing_begin(TimingPhase::ParentSync);
+        let result = [&l0, &ltx, &self.meta_path]
+            .into_iter()
+            .try_for_each(|path| self.host.facilities.filesystem.sync_parent(path));
+        self.timing_end(TimingPhase::ParentSync);
+        result?;
+        self.l0_ancestors_durable = true;
+        Ok(())
     }
 
     fn acquire_read_lock(&mut self) -> Result<()> {
@@ -530,11 +441,18 @@ impl CaptureEngine {
         self.position
     }
 
-    pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
-        self.last_l0_segment
-            .as_ref()
-            .filter(|info| info.max_txid == txid.0)
-            .cloned()
+    #[cfg(feature = "replica")]
+    pub(crate) fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn checksums(&self) -> &crate::pages::PageChecksums {
+        &self.checksums
+    }
+
+    pub(crate) fn take_sealed_l0_segment(&mut self, txid: Txid) -> Option<crate::SegmentInfo> {
+        self.sealed_l0_segments.remove(&txid.0)
     }
 
     #[cfg(feature = "replica")]
@@ -556,8 +474,7 @@ impl CaptureEngine {
         {
             return Err(LtxError::ChecksumMismatch);
         }
-        let wal = self.wal_header_bytes()?;
-        self.last_l0_segment = None;
+        self.sealed_l0_segments.clear();
         #[cfg(feature = "replica")]
         {
             self.sealed_l0_captured_indexes.clear();
@@ -567,8 +484,7 @@ impl CaptureEngine {
             LastL0Header {
                 wal_offset: WAL_HEADER_SIZE as i64,
                 wal_size: 0,
-                wal_salt1: be_u32(&wal[16..]),
-                wal_salt2: be_u32(&wal[20..]),
+                wal_salts: None,
                 commit: count,
                 final_pgno: 0,
                 final_page: Vec::new(),
@@ -578,83 +494,6 @@ impl CaptureEngine {
         self.checksums = checksums;
         self.last_db_pages = count;
         Ok(())
-    }
-
-    pub(crate) fn start_timing(&mut self, now: Instant) {
-        self.timing = Some(TimingRecorder::new(now));
-    }
-
-    pub(crate) fn finish_timing(&mut self, now: Instant) -> crate::CaptureTiming {
-        self.timing
-            .take()
-            .map(|recorder| recorder.finish(now))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn timing_begin(&mut self, phase: TimingPhase) {
-        if self.timing.is_some() {
-            let now = self.host.now_monotonic();
-            if let Some(recorder) = &mut self.timing {
-                recorder.begin(phase, now);
-            }
-        }
-    }
-
-    pub(crate) fn timing_end(&mut self, phase: TimingPhase) {
-        if self.timing.is_some() {
-            let now = self.host.now_monotonic();
-            if let Some(recorder) = &mut self.timing {
-                recorder.end(phase, now);
-            }
-        }
-    }
-
-    pub(crate) fn timing_add_wal_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_wal_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_database_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_database_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_ltx_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_ltx_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_segment(&mut self) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_segment();
-        }
-    }
-
-    pub(crate) fn timing_add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_phase_nanos(phase, elapsed);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_image(sparse, fallback, bytes);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_transfer(file_bytes, read_bytes);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_snapshot(&mut self) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_snapshot();
-        }
     }
 
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
@@ -695,8 +534,7 @@ impl CaptureEngine {
             let end = WAL_HEADER_SIZE as i64
                 + i64::from(required.frames)
                     * (i64::from(self.page_size) + WAL_FRAME_HEADER_SIZE as i64);
-            if header.wal_salt1 != required.salt1
-                || header.wal_salt2 != required.salt2
+            if header.wal_salts != Some((required.salt1, required.salt2))
                 || self.last_synced_wal_offset < end
             {
                 return Err(LtxError::LTXCorrupted);
@@ -875,48 +713,4 @@ impl WalImage {
 #[inline]
 fn be_u32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-}
-
-#[cfg(test)]
-mod timing_tests {
-    use super::*;
-
-    #[test]
-    fn recorder_uses_monotonic_instants_without_affecting_capture_state() {
-        let start = Instant::now();
-        let mut recorder = TimingRecorder::new(start);
-        recorder.begin(TimingPhase::Preparation, start + Duration::from_millis(1));
-        recorder.end(TimingPhase::Preparation, start + Duration::from_millis(3));
-        recorder.begin(TimingPhase::WalRead, start + Duration::from_millis(4));
-        recorder.end(TimingPhase::WalRead, start + Duration::from_millis(9));
-        recorder.add_wal_bytes(11);
-        recorder.add_database_bytes(22);
-        recorder.add_ltx_bytes(33);
-        recorder.add_segment();
-
-        let timing = recorder.finish(start + Duration::from_millis(10));
-        assert_eq!(timing.total_nanos, 10_000_000);
-        assert_eq!(timing.preparation_nanos, 2_000_000);
-        assert_eq!(timing.wal_read_nanos, 5_000_000);
-        assert_eq!(timing.wal_bytes, 11);
-        assert_eq!(timing.database_bytes, 22);
-        assert_eq!(timing.ltx_bytes, 33);
-        assert_eq!(timing.segment_count, 1);
-    }
-
-    #[test]
-    fn recorder_closes_an_incomplete_phase_and_saturates_counters() {
-        let start = Instant::now();
-        let mut recorder = TimingRecorder::new(start);
-        recorder.begin(TimingPhase::Encode, start);
-        recorder.add_wal_bytes(u64::MAX);
-        recorder.add_wal_bytes(1);
-        recorder.add_segment();
-        recorder.add_segment();
-
-        let timing = recorder.finish(start + Duration::from_nanos(7));
-        assert_eq!(timing.encode_nanos, 7);
-        assert_eq!(timing.wal_bytes, u64::MAX);
-        assert_eq!(timing.segment_count, 2);
-    }
 }

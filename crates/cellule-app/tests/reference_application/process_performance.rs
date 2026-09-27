@@ -1,7 +1,11 @@
-use super::fleet::{GatewayStats, start_balancer, start_gateway_peer_server, start_peer_server};
-use super::performance::{performance_iterations, run_reference_primitive_performance};
-use super::performance_fixture::{PerfFixture, node_session, owner_routes, perf_cells};
-use super::*;
+use super::fleet::{
+    GatewayStats, start_balancer, start_bound_peer_server, start_gateway_peer_server,
+};
+use super::performance::run_reference_primitive_performance;
+use super::performance_fixture::{
+    PerfFixture, node_session, owner_routes, perf_cells, rustfs_store,
+};
+use crate::*;
 use std::{
     env,
     net::SocketAddr,
@@ -10,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use cellule_runtime::{PeerSigner, PeerVerifier};
+use cellule_runtime::peer::{PeerReplicaResolver, PeerSigner, PeerVerifier};
 use tokio::net::TcpListener;
 
 const ROLE_ENV: &str = "CELLULE_PERF_PROCESS_NODE";
@@ -18,7 +22,7 @@ const ROOT_ENV: &str = "CELLULE_PERF_PROCESS_ROOT";
 const SYNC_ENV: &str = "CELLULE_PERF_PROCESS_SYNC";
 const GATEWAY_ENV: &str = "CELLULE_PERF_PROCESS_GATEWAY";
 
-struct ChildGuard(Child);
+pub(super) struct ChildGuard(pub(super) Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -27,41 +31,54 @@ impl Drop for ChildGuard {
     }
 }
 
-fn shared_store(root: &Path) -> Store {
-    Store::new(Arc::new(
-        cellule_store::test_support::FilesystemCasStore::new(root).unwrap(),
-    ))
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "child role for manual three-process performance run"]
+#[ignore = "independent node role for native and Compose qualification"]
 async fn fleet_process_role() {
-    let Ok(node) = env::var(ROLE_ENV) else {
-        return;
-    };
+    let node = env::var(ROLE_ENV).unwrap();
     let node: usize = node.parse().unwrap();
-    assert!(node < 3);
+    // Twenty live nodes plus one killed boot; replacement never reuses a session.
+    assert!(node <= 20);
     let root = env::var(ROOT_ENV).unwrap();
     let sync = env::var(SYNC_ENV).unwrap();
-    let store = shared_store(Path::new(&root));
+    let store = rustfs_store();
     let application = Arc::new(compiled());
     let registry = application.registry();
     let tenant = TenantId::from_bytes([81; 16]);
     let application_id = ApplicationId::from_bytes([82; 16]);
     let layout = CellStorageLayout::new(
         store,
-        object_store::path::Path::from("reference-performance"),
+        object_store::path::Path::from(root),
         *application_id.as_bytes(),
     );
-    let directory = tempfile::Builder::new()
-        .prefix(&format!("node-{node}-"))
-        .tempdir_in(&sync)
-        .unwrap();
-    let runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(4, 32).unwrap(),
-        64 * 1024 * 1024,
-        node_session(node),
-        reference_host(),
+    // Only control markers are shared; SQLite, WAL and cache files belong to
+    // this process/container and cannot be used by another owner.
+    let directory = tempfile::TempDir::new().unwrap();
+    let started = std::time::Instant::now();
+    let bind = env::var("CELLULE_PERF_PROCESS_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
+    let listener = TcpListener::bind(&bind).await.unwrap();
+    let advertised = match env::var("CELLULE_PERF_PROCESS_ADVERTISE") {
+        Ok(endpoint) => tokio::net::lookup_host(endpoint)
+            .await
+            .unwrap()
+            .next()
+            .unwrap(),
+        Err(_) => listener.local_addr().unwrap(),
+    };
+    let (host, durability, readers) = super::process_node::start(
+        node,
+        Arc::clone(&application),
+        &layout,
+        directory.path(),
+        format!("https://{advertised}"),
+    )
+    .await;
+    let runtime = host.runtime();
+    let reader = Arc::new(readers);
+    let read_target = CellTarget::new(
+        tenant,
+        application_id,
+        SQL_NAMESPACE,
+        &partition_for_shard(0),
     )
     .unwrap();
     let mut handles = Vec::new();
@@ -104,8 +121,7 @@ async fn fleet_process_role() {
     let gateway = env::var_os(GATEWAY_ENV).is_some();
     let stats = Arc::new(GatewayStats::default());
     let server = if gateway {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        publish_address(&marker, listener.local_addr().unwrap());
+        publish_address(&marker, advertised);
         let mut owners = Vec::new();
         for owner in 0..3 {
             let ready = Path::new(&sync).join(format!("node-{owner}.ready"));
@@ -120,6 +136,7 @@ async fn fleet_process_role() {
             owners.push(std::fs::read_to_string(ready).unwrap().parse().unwrap());
         }
         let routes = owner_routes(tenant, application_id, [owners[0], owners[1], owners[2]]);
+        let routes = Arc::new(std::sync::RwLock::new(routes));
         let server = start_gateway_peer_server(
             listener,
             &registry,
@@ -127,20 +144,93 @@ async fn fleet_process_role() {
             handles,
             routes,
             Arc::clone(&stats),
+            Some((
+                reader.clone(),
+                super::process_node::directory(&layout, &registry),
+            )),
         );
         std::fs::write(Path::new(&sync).join(format!("node-{node}.serving")), []).unwrap();
         server
     } else {
-        let (address, server) = start_peer_server(&registry, verifier, handles).await;
-        publish_address(&marker, address);
+        let server = start_bound_peer_server(
+            listener,
+            &registry,
+            verifier,
+            handles,
+            Some((
+                reader.clone(),
+                super::process_node::directory(&layout, &registry),
+            )),
+        );
+        publish_address(&marker, advertised);
         server
     };
     let stop = Path::new(&sync).join("stop");
+    let activated = Path::new(&sync).join(format!("node-{node}-readers.ready"));
+    let evict = Path::new(&sync).join("readers.evicted");
+    let evicted = Path::new(&sync).join(format!("node-{node}-readers.evicted"));
+    let minimum = Path::new(&sync).join("readers.minimum");
+    let refreshed = Path::new(&sync).join(format!("node-{node}-readers.refreshed"));
     while !stop.exists() {
+        if !activated.exists()
+            && (node == 0
+                || reader
+                    .status(read_target.clone())
+                    .await
+                    .is_ok_and(|(_, ready)| ready))
+        {
+            // Readiness observes authenticated owner recruitment; no fixture hint is sent.
+            std::fs::write(&activated, []).unwrap();
+        }
+        if node != 0 && minimum.exists() && !refreshed.exists() {
+            let sequence: u64 = std::fs::read_to_string(&minimum).unwrap().parse().unwrap();
+            let (receipt, ready) = reader.status(read_target.clone()).await.unwrap();
+            if ready && receipt.commit_sequence >= sequence {
+                // This only observes the supervisor; no refresh hint is sent.
+                std::fs::write(&refreshed, []).unwrap();
+            }
+        }
+        if evict.exists()
+            && !evicted.exists()
+            && matches!(
+                reader.resolve(read_target.clone()).await,
+                Err(Error::ReplicaUnavailable)
+            )
+        {
+            // Observe the host supervisor's eviction; the fixture does not remove the view.
+            std::fs::write(&evicted, []).unwrap();
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     server.abort();
-    runtime.shutdown().await.unwrap();
+    println!(
+        "PERF node_{node}: active_cells={} retained_bytes={} local_disk_reserved_bytes={}",
+        host.stats().active_cells(),
+        host.stats().retained_bytes(),
+        host.stats().local_disk_reserved_bytes()
+    );
+    host.shutdown().await.unwrap();
+    assert!(matches!(
+        reader.activate(read_target.clone(), node_session(0)).await,
+        Err(Error::RuntimeClosed)
+    ));
+    assert!(matches!(
+        reader.resolve(read_target).await,
+        Err(Error::RuntimeClosed)
+    ));
+    println!("PERF node_{node}_reader_drained: activation_closed=1 resolver_closed=1");
+    let mut waits = durability.object_waits();
+    assert!(
+        node >= 3 || !waits.is_empty(),
+        "node {node} did not prove an object-backed mutation"
+    );
+    if !waits.is_empty() {
+        super::performance::report_samples(
+            &format!("node_{node}_object_proof_wait"),
+            &mut waits,
+            started.elapsed(),
+        );
+    }
     if gateway {
         let (local, forwarded) = stats.counts();
         std::fs::write(
@@ -149,9 +239,10 @@ async fn fleet_process_role() {
         )
         .unwrap();
     }
+    std::fs::write(Path::new(&sync).join(format!("node-{node}.done")), []).unwrap();
 }
 
-fn publish_address(marker: &Path, address: SocketAddr) {
+pub(super) fn publish_address(marker: &Path, address: SocketAddr) {
     let temporary = marker.with_extension("tmp");
     std::fs::write(&temporary, address.to_string()).unwrap();
     std::fs::rename(temporary, marker).unwrap();
@@ -171,23 +262,27 @@ async fn reference_balanced_three_process_fleet_end_to_end_performance() {
 
 async fn run_three_process_fleet(balanced: bool) {
     let directory = tempfile::TempDir::new().unwrap();
-    let objects = directory.path().join("objects");
-    std::fs::create_dir_all(&objects).unwrap();
-    let store = shared_store(&objects);
+    let root = format!(
+        "{}/process-{}-{}",
+        env::var("CELLULE_TEST_PREFIX").unwrap(),
+        std::process::id(),
+        directory.path().file_name().unwrap().to_str().unwrap()
+    );
+    let store = rustfs_store();
+    println!("PERF backend=rustfs object_prefix={root}");
     let binary = env::current_exe().unwrap();
+    // Libtest omits the crate name; preserve the remaining module path when
+    // this suite moves so a child cannot silently select zero tests.
+    let module = module_path!().split_once("::").unwrap().1;
+    let child_test = format!("{module}::fleet_process_role");
     let mut children = Vec::new();
     let mut owners = Vec::new();
     for node in 0..3 {
         let mut command = Command::new(&binary);
         command
-            .args([
-                "--exact",
-                "process_performance::fleet_process_role",
-                "--ignored",
-                "--nocapture",
-            ])
+            .args(["--exact", &child_test, "--ignored", "--nocapture"])
             .env(ROLE_ENV, node.to_string())
-            .env(ROOT_ENV, &objects)
+            .env(ROOT_ENV, &root)
             .env(SYNC_ENV, directory.path())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -250,7 +345,15 @@ async fn run_three_process_fleet(balanced: bool) {
     } else {
         "fleet_three_process_mixed"
     };
-    run_reference_primitive_performance(&fixture, true, label, performance_iterations()).await;
+    run_reference_primitive_performance(&fixture, true, label).await;
+    generated_action(&fixture).await;
+    super::process_replica::verify(
+        &fixture,
+        &sync_dir,
+        &root,
+        [owners[0], owners[1], owners[2]],
+    )
+    .await;
     if let Some((_, server, stats)) = balancer {
         server.abort();
         let counts = stats.counts();
@@ -294,4 +397,112 @@ async fn run_three_process_fleet(balanced: bool) {
     }
     drop(children);
     drop(fixture);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "Compose driver for three constrained public CellNode processes and RustFS"]
+async fn reference_compose_fleet_end_to_end_performance() {
+    let sync = env::var(SYNC_ENV).unwrap();
+    let sync = Path::new(&sync);
+    let mut owners = Vec::new();
+    for node in 0..3 {
+        wait_for_marker(&sync.join(format!("node-{node}.serving"))).await;
+        owners.push(
+            std::fs::read_to_string(sync.join(format!("node-{node}.ready")))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
+    let owners = [owners[0], owners[1], owners[2]];
+    let (balancer, server, stats) = start_balancer(owners).await;
+    let fixture = PerfFixture::from_processes(
+        tempfile::TempDir::new().unwrap(),
+        rustfs_store(),
+        owners,
+        Some(balancer),
+    );
+    run_reference_primitive_performance(&fixture, true, "compose_three_node_mixed").await;
+    generated_action(&fixture).await;
+    super::process_replica::verify(&fixture, sync, &env::var(ROOT_ENV).unwrap(), owners).await;
+    server.abort();
+    let counts = stats.counts();
+    assert!(counts.iter().all(|count| *count > 0));
+    assert!(counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1);
+    println!("PERF balancer_entries={counts:?}");
+    std::fs::write(sync.join("stop"), []).unwrap();
+    for node in 0..3 {
+        wait_for_marker(&sync.join(format!("node-{node}.done"))).await;
+        let counts = std::fs::read_to_string(sync.join(format!("node-{node}.counts"))).unwrap();
+        let (local, forwarded) = counts.trim().split_once(' ').unwrap();
+        assert!(local.parse::<usize>().unwrap() > 0 && forwarded.parse::<usize>().unwrap() > 0);
+        println!("PERF gateway_node_{node}: local={local} forwarded={forwarded}");
+    }
+}
+
+pub(super) async fn wait_for_marker(marker: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !marker.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "node marker timed out: {marker:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn generated_action(fixture: &PerfFixture) {
+    let client = ReferenceClient::new(fixture.typed.clone()).unwrap();
+    let order = client.orders(&OrderId(b"process-proof".to_vec())).unwrap();
+    let before = order.receipt_count(None, ()).await.unwrap().output;
+    let identity = super::performance_fixture::identity(103, 0, 0);
+    let input = CronInvocation {
+        schedule_id: [103; 16],
+        generation: 1,
+        occurrence: 1,
+        scheduled_at_ms: super::performance_fixture::now_ms(),
+        payload: b"process-proof".to_vec(),
+    };
+    let prepared = order
+        .prepare_receive_cron(identity, input.clone())
+        .await
+        .unwrap();
+    let committed = prepared.execute().await.unwrap();
+    let duplicate = order.receive_cron(identity, input).await.unwrap();
+    assert_eq!(duplicate.receipt, committed.receipt);
+    assert_eq!(
+        order
+            .receipt_count(Some(committed.receipt), ())
+            .await
+            .unwrap()
+            .output,
+        before + 1
+    );
+    println!("PERF generated_action: committed=1 duplicate_deliveries=1 visible_effects=1");
+}
+
+pub(super) struct Controller<'a> {
+    sync: &'a Path,
+    sequence: usize,
+}
+
+impl<'a> Controller<'a> {
+    pub(super) fn new(sync: &'a Path) -> Self {
+        Self { sync, sequence: 0 }
+    }
+
+    pub(super) async fn command(&mut self, action: &str, count: usize) -> Vec<usize> {
+        let path = self.sync.join(format!("fleet-{}.request", self.sequence));
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, format!("{action} {count}")).unwrap();
+        std::fs::rename(temporary, &path).unwrap();
+        let done = path.with_extension("done");
+        wait_for_marker(&done).await;
+        self.sequence += 1;
+        std::fs::read_to_string(done)
+            .unwrap()
+            .split_whitespace()
+            .map(|node| node.parse().unwrap())
+            .collect()
+    }
 }

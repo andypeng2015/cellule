@@ -1,31 +1,62 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 
+use futures_util::future::BoxFuture;
 use prost::Message;
 
-use crate::{
-    CellDescription, CellHandle, CellTarget, CommandInvocation, Digest, Error, InboxDelivery,
-    IncarnationId, MutationIdentity, Receipt, Registry, RequestId, Resolution, Result,
-    StoredOutcome,
-    client::{
-        CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
-        LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
-    },
+use crate::cell::actor::CellHandle;
+use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
+use crate::client::{CellDescription, CellReadReplica, Receipt};
+use crate::client::{
+    CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
+    LocalCellTransport, encoded_command_operation_digest, local_description, next_metadata,
+    receipt,
 };
+use crate::fleet::telemetry::{
+    CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
+};
+use crate::identity::{CellTarget, Digest, IncarnationId, RequestId, SessionId};
+use crate::primitives::effects::InboxDelivery;
+use crate::registry::{CommandInvocation, Registry};
+use crate::{Error, Result};
 
-use super::{VerifiedPeerRequest, wire};
+use super::{VerifiedPeerRequest, wire, wire_description};
 
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
 /// Resolves only a currently active owner on the receiving node.
 pub trait PeerCellResolver: Send + Sync + 'static {
+    /// Resolves one target to an active local Cell handle.
     fn resolve(
         &self,
         target: CellTarget,
     ) -> Pin<Box<dyn Future<Output = Result<CellHandle>> + Send + 'static>>;
 }
 
+/// Resolves only an admitted local read-only snapshot on the receiving node.
+pub trait PeerReplicaResolver: Send + Sync + 'static {
+    /// Returns a ready snapshot for the exact target or an unavailable error.
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = Result<CellReadReplica>> + Send + 'static>>;
+}
+
+/// Controls admitted snapshots after the receiver authorizes the peer operation.
+pub trait PeerReplicaControl: Send + Sync + 'static {
+    /// Admits a selected snapshot only on a current owner's authenticated hint.
+    fn activate(
+        &self,
+        target: CellTarget,
+        origin: SessionId,
+    ) -> BoxFuture<'static, Result<Receipt>>;
+
+    /// Reports the exact admitted position and current owner readiness.
+    fn status(&self, target: CellTarget) -> BoxFuture<'static, Result<(Receipt, bool)>>;
+}
+
 /// Rechecks current product authorization after peer authentication.
 pub trait PeerAuthorizer: Send + Sync + 'static {
+    /// Rechecks product authorization for one verified request.
     fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()>;
 }
 
@@ -33,10 +64,15 @@ pub trait PeerAuthorizer: Send + Sync + 'static {
 pub struct PeerDispatcher {
     registry: Arc<Registry>,
     resolver: Arc<dyn PeerCellResolver>,
+    replicas: Option<Arc<dyn PeerReplicaResolver>>,
+    replica_control: Option<Arc<dyn PeerReplicaControl>>,
     authorizer: Arc<dyn PeerAuthorizer>,
+    telemetry: CellTelemetryHandle,
 }
 
 impl PeerDispatcher {
+    /// Creates a dispatcher over the compiled registry and its resolver and
+    /// authorizer.
     #[must_use]
     pub fn new(
         registry: Arc<Registry>,
@@ -46,8 +82,32 @@ impl PeerDispatcher {
         Self {
             registry,
             resolver,
+            replicas: None,
+            replica_control: None,
             authorizer,
+            telemetry: CellTelemetryHandle::default(),
         }
+    }
+
+    /// Reports primitive operations executed for peer requests.
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: CellTelemetryHandle) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Binds an admitted snapshot resolver for explicit peer replica queries.
+    #[must_use]
+    pub fn with_replica_resolver(mut self, replicas: Arc<dyn PeerReplicaResolver>) -> Self {
+        self.replicas = Some(replicas);
+        self
+    }
+
+    /// Binds owner-hinted activation and readiness to the node's reader lifecycle.
+    #[must_use]
+    pub fn with_replica_control(mut self, control: Arc<dyn PeerReplicaControl>) -> Self {
+        self.replica_control = Some(control);
+        self
     }
 
     /// Authorizes, resolves and dispatches one verified request without a second SQL path.
@@ -55,14 +115,109 @@ impl PeerDispatcher {
         if let Err(error) = self.authorizer.authorize(request) {
             return error_reply(error);
         }
-        let handle = match self.resolver.resolve(request.target().clone()).await {
+        let resolved = if matches!(
+            request.operation(),
+            Some(wire::peer_request::Operation::Read(wire::ReadRequest {
+                operation: Some(
+                    wire::read_request::Operation::ReplicaQuery(_)
+                        | wire::read_request::Operation::ReplicaActivate(_)
+                        | wire::read_request::Operation::ReplicaStatus(_)
+                ),
+                ..
+            }))
+        ) {
+            // Explicit replica queries use snapshot admission, never owner activation.
+            Err(Error::CellNotActive)
+        } else {
+            self.resolver.resolve(request.target().clone()).await
+        };
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    /// Dispatches with a receiver-resolved local handle after rechecking authorization.
+    ///
+    /// The handle must still match the exact target; actor admission fences a
+    /// handle whose owner changed after resolution. Replica queries ignore the
+    /// owner result and use the admitted snapshot resolver.
+    pub async fn dispatch_resolved(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        if let Err(error) = self.authorizer.authorize(request) {
+            return error_reply(error);
+        }
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    async fn dispatch_authorized(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
+            && matches!(
+                read.operation,
+                Some(
+                    wire::read_request::Operation::ReplicaActivate(true)
+                        | wire::read_request::Operation::ReplicaStatus(true)
+                )
+            )
+        {
+            let result = async {
+                let control = self
+                    .replica_control
+                    .as_ref()
+                    .ok_or(Error::ReplicaUnavailable)?;
+                if matches!(
+                    read.operation,
+                    Some(wire::read_request::Operation::ReplicaActivate(true))
+                ) {
+                    control
+                        .activate(request.target().clone(), request.origin_session())
+                        .await
+                        .map(|receipt| (receipt, true))
+                } else {
+                    control.status(request.target().clone()).await
+                }
+            }
+            .await;
+            return match result {
+                Ok((receipt, ready)) => wire::PeerReply {
+                    outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
+                        receipt: Some(wire_receipt(receipt)),
+                        result: Some(wire::read_reply::Result::ReplicaReady(ready)),
+                    })),
+                },
+                Err(error) => error_reply(error),
+            };
+        }
+        if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
+            && let Some(wire::read_request::Operation::ReplicaQuery(query)) =
+                read.operation.as_ref()
+        {
+            return self
+                .replica_query(request.target().clone(), read, query, now_ms)
+                .await;
+        }
+        let handle = match resolved {
             Ok(handle) => handle,
             Err(error) => return error_reply(error),
         };
+        let entry = handle.catalog().entry();
+        if handle.cell_id() != request.target().cell_id()
+            || entry.namespace() != request.target().namespace()
+            || entry.partition() != request.target().partition()
+        {
+            return error_reply(Error::CatalogCollision);
+        }
         let transport = LocalCellTransport {
             registry: Arc::clone(&self.registry),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),
             handle,
+            telemetry: self.telemetry.clone(),
         };
         match request.operation() {
             Some(wire::peer_request::Operation::Mutate(mutation)) => {
@@ -87,6 +242,56 @@ impl PeerDispatcher {
         }
     }
 
+    async fn replica_query(
+        &self,
+        target: CellTarget,
+        read: &wire::ReadRequest,
+        query: &wire::CellQuery,
+        now_ms: i64,
+    ) -> wire::PeerReply {
+        let result = async {
+            let resolver = self.replicas.as_ref().ok_or(Error::ReplicaUnavailable)?;
+            let replica = resolver.resolve(target.clone()).await.map_err(|error| {
+                if matches!(error, Error::CellNotActive) {
+                    Error::ReplicaUnavailable
+                } else {
+                    error
+                }
+            })?;
+            let expected = replica.description();
+            validate_expected(read.expected.as_ref(), expected)?;
+            let (module, operation) = self.registry.routed_query_contract(
+                target.namespace(),
+                query.query_id,
+                query.codec_version,
+            )?;
+            replica
+                .query_encoded(EncodedQuery {
+                    target,
+                    expected,
+                    minimum: read.minimum.as_ref().map(runtime_receipt).transpose()?,
+                    now_ms,
+                    module,
+                    operation_id: query.query_id,
+                    codec_version: query.codec_version,
+                    input: query.input.clone(),
+                    input_limit: operation.input_limit,
+                    output_limit: operation.output_limit,
+                })
+                .await
+        }
+        .await;
+        match result {
+            Ok(observation) => wire::PeerReply {
+                outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
+                    receipt: Some(wire_receipt(observation.receipt)),
+                    result: Some(wire::read_reply::Result::CommandOutput(observation.output)),
+                })),
+            },
+            Err(error) => error_reply(error),
+        }
+    }
+
     /// Encodes the validated reply for the management HTTP response body.
     pub async fn dispatch_bytes(
         &self,
@@ -106,6 +311,14 @@ impl PeerDispatcher {
         let result = self.mutate_inner(transport, request, now_ms).await;
         let outcome = match result {
             Ok(outcome) => mutation_reply(transport, outcome),
+            // Command execution wraps fenced commit/publication failures as
+            // OutcomeUnknown. A direct FULL here therefore proves rollback;
+            // migration and other peer operations retain their own contract.
+            Err(Error::Sqlite(error))
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) =>
+            {
+                return error_reply(Error::Capacity("SQLite database full"));
+            }
             Err(error) => return error_reply(error),
         };
         wire::PeerReply {
@@ -120,6 +333,7 @@ impl PeerDispatcher {
         now_ms: i64,
     ) -> Result<StoredOutcome> {
         let expected = local_description(&transport.handle);
+        validate_expected(request.expected.as_ref(), expected)?;
         let identity = mutation_identity(
             request
                 .identity
@@ -176,7 +390,7 @@ impl PeerDispatcher {
         let expected = local_description(&transport.handle);
         let result = match request.operation.as_ref() {
             Some(wire::read_request::Operation::Describe(true)) => {
-                wire::read_reply::Result::Description(description(expected))
+                wire::read_reply::Result::Description(wire_description(expected))
             }
             Some(wire::read_request::Operation::CellQuery(query)) => {
                 match self
@@ -214,6 +428,7 @@ impl PeerDispatcher {
         expected: CellDescription,
         now_ms: i64,
     ) -> Result<EncodedObservation> {
+        validate_expected(request.expected.as_ref(), expected)?;
         let target = request_target(request.target.as_ref())?;
         let (module, descriptor) = self.registry.routed_query_contract(
             target.namespace(),
@@ -251,6 +466,7 @@ impl PeerDispatcher {
     ) -> wire::PeerReply {
         let expected = local_description(&transport.handle);
         let result = async {
+            validate_expected(request.expected.as_ref(), expected)?;
             let identity = mutation_identity(
                 request
                     .identity
@@ -337,7 +553,7 @@ impl PeerDispatcher {
         let encoded_request = request.encode_to_vec();
         let delivery = InboxDelivery {
             effect_id,
-            operation_digest: crate::effect_operation_digest(
+            operation_digest: crate::primitives::effects::effect_operation_digest(
                 target.cell_id(),
                 effect_id,
                 &encoded_operation,
@@ -345,6 +561,7 @@ impl PeerDispatcher {
             expires_at_ms: identity.expires_at_ms,
         };
         let registry = Arc::clone(&self.registry);
+        let telemetry = self.telemetry.clone();
         let schema = transport.handle.schema();
         let input = command.input.clone();
         let operation_id = command.command_id;
@@ -357,7 +574,9 @@ impl PeerDispatcher {
                 encoded_request.len(),
                 descriptor.output_limit as usize,
                 move |transaction| {
-                    registry.execute_command(
+                    let (sequence, logical_time_ms) = next_metadata(transaction, now_ms)?;
+                    let started = Instant::now();
+                    let result = registry.execute_command_with_issue_time(
                         transaction,
                         CommandInvocation {
                             module,
@@ -365,11 +584,19 @@ impl PeerDispatcher {
                             codec_version,
                             schema,
                             target: target.clone(),
-                            sequence: next_sequence(transaction)?,
-                            now_ms,
+                            sequence,
+                            now_ms: logical_time_ms,
                             input: &input,
                         },
-                    )
+                        now_ms,
+                    );
+                    telemetry.primitive_operation(
+                        module,
+                        PrimitiveOperationKind::Command,
+                        PrimitiveOperationOutcome::from(&result),
+                        started.elapsed(),
+                    );
+                    result
                 },
             )
             .await
@@ -420,7 +647,7 @@ impl PeerDispatcher {
         match result {
             Ok(current) => wire::PeerReply {
                 outcome: Some(wire::peer_reply::Outcome::Migration(wire::MigrationReply {
-                    description: Some(description(current)),
+                    description: Some(wire_description(current)),
                 })),
             },
             Err(error) => error_reply(error),
@@ -472,269 +699,7 @@ impl PeerDispatcher {
     }
 }
 
-fn validate_effect_incarnation(value: &[u8], expected: CellDescription) -> Result<()> {
-    if IncarnationId::try_from(value)? != expected.incarnation {
-        return Err(Error::Fenced);
-    }
-    Ok(())
-}
+mod convert;
 
-fn exact_effect_id(identity: &wire::EffectIdentity) -> Result<[u8; 32]> {
-    let effect_id = <[u8; 32]>::try_from(identity.effect_id.as_slice())
-        .map_err(|_| Error::Peer("invalid effect ID length"))?;
-    let expected = crate::effect_id(
-        crate::CellId::try_from(identity.source_cell.as_slice())?,
-        IncarnationId::try_from(identity.source_incarnation.as_slice())?,
-        identity.source_sequence,
-        identity.ordinal,
-    );
-    if effect_id != expected {
-        return Err(Error::Peer("effect identity derivation does not match"));
-    }
-    Ok(effect_id)
-}
-
-fn next_sequence(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<u64> {
-    let sequence = transaction.query_row(
-        "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    u64::try_from(sequence)
-        .ok()
-        .filter(|sequence| *sequence != 0)
-        .ok_or(Error::Command("invalid next Cell sequence"))
-}
-
-fn mutation_identity(
-    identity: &wire::MutationIdentity,
-    expected_incarnation: IncarnationId,
-) -> Result<MutationIdentity> {
-    if IncarnationId::try_from(identity.incarnation.as_slice())? != expected_incarnation {
-        return Err(Error::Fenced);
-    }
-    Ok(MutationIdentity {
-        request_id: RequestId::try_from(identity.request_id.as_slice())?,
-        issued_at_ms: identity.issued_at_ms,
-        expires_at_ms: identity.expires_at_ms,
-    })
-}
-
-fn request_target(target: Option<&wire::Target>) -> Result<CellTarget> {
-    let target = target.ok_or(Error::Peer("peer target is missing"))?;
-    CellTarget::new(
-        crate::TenantId::try_from(target.tenant_id.as_slice())?,
-        crate::ApplicationId::try_from(target.application_id.as_slice())?,
-        crate::NamespaceId::try_from(target.namespace_id.as_slice())?,
-        &target.partition,
-    )
-}
-
-fn validate_description(
-    registry: &Registry,
-    module: &str,
-    description: CellDescription,
-    schema_min: u32,
-    schema_max: u32,
-) -> Result<()> {
-    if !registry.supports_module_code(module, description.code, description.schema)
-        || !(schema_min..=schema_max).contains(&description.schema)
-    {
-        return Err(Error::Fenced);
-    }
-    Ok(())
-}
-
-fn mutation_reply(transport: &LocalCellTransport, outcome: StoredOutcome) -> wire::MutationReply {
-    let description = local_description(&transport.handle);
-    match outcome {
-        StoredOutcome::Success {
-            result,
-            commit_sequence,
-        } => wire::MutationReply {
-            receipt: Some(wire_receipt(receipt(description, commit_sequence))),
-            outcome: Some(wire::mutation_reply::Outcome::Result(
-                wire::MutationResult {
-                    result: Some(wire::mutation_result::Result::CommandOutput(result)),
-                },
-            )),
-        },
-        StoredOutcome::Rejected {
-            result,
-            commit_sequence,
-        } => wire::MutationReply {
-            receipt: Some(wire_receipt(receipt(description, commit_sequence))),
-            outcome: Some(wire::mutation_reply::Outcome::Error(wire::Error {
-                code: wire::error::Code::PreconditionFailed as i32,
-                outcome: wire::error::Outcome::Rejected as i32,
-                message: "Cell command was durably rejected".into(),
-                retry_after_ms: 0,
-                application_details: result,
-            })),
-        },
-    }
-}
-
-fn resolve_reply(transport: &LocalCellTransport, resolution: Resolution) -> wire::ResolveReply {
-    match resolution {
-        Resolution::Committed(outcome) => wire::ResolveReply {
-            state: match &outcome {
-                StoredOutcome::Success { .. } => wire::resolve_reply::State::Committed as i32,
-                StoredOutcome::Rejected { .. } => wire::resolve_reply::State::Rejected as i32,
-            },
-            reply: Some(mutation_reply(transport, outcome)),
-        },
-        Resolution::Absent => wire::ResolveReply {
-            state: wire::resolve_reply::State::Absent as i32,
-            reply: None,
-        },
-        Resolution::Unknown => wire::ResolveReply {
-            state: wire::resolve_reply::State::Unknown as i32,
-            reply: None,
-        },
-        Resolution::Expired => wire::ResolveReply {
-            state: wire::resolve_reply::State::Expired as i32,
-            reply: None,
-        },
-    }
-}
-
-fn description(value: CellDescription) -> wire::CellDescription {
-    wire::CellDescription {
-        cell_id: value.cell.as_bytes().to_vec(),
-        incarnation: value.incarnation.as_bytes().to_vec(),
-        code: value.code.as_bytes().to_vec(),
-        schema: value.schema,
-    }
-}
-
-fn runtime_receipt(value: &wire::Receipt) -> Result<Receipt> {
-    Ok(Receipt {
-        cell: crate::CellId::try_from(value.cell_id.as_slice())?,
-        incarnation: IncarnationId::try_from(value.incarnation.as_slice())?,
-        commit_sequence: value.commit_sequence,
-    })
-}
-
-fn wire_receipt(value: Receipt) -> wire::Receipt {
-    wire::Receipt {
-        cell_id: value.cell.as_bytes().to_vec(),
-        incarnation: value.incarnation.as_bytes().to_vec(),
-        commit_sequence: value.commit_sequence,
-    }
-}
-
-fn error_reply(error: Error) -> wire::PeerReply {
-    let (code, outcome, message, retry_after_ms) = match error {
-        Error::RequestConflict => (
-            wire::error::Code::RequestIdConflict,
-            wire::error::Outcome::Rejected,
-            "request identity conflicts with a stored operation",
-            0,
-        ),
-        Error::OutcomeUnknown { .. } | Error::EffectOutcomeUnknown { .. } => (
-            wire::error::Code::OutcomeUnknown,
-            wire::error::Outcome::Unknown,
-            "accepted command outcome requires resolution",
-            100,
-        ),
-        Error::EffectExpired => (
-            wire::error::Code::RequestExpired,
-            wire::error::Outcome::Rejected,
-            "Cell effect expired before delivery",
-            0,
-        ),
-        Error::Capacity(_) => (
-            wire::error::Code::ResourceExhausted,
-            wire::error::Outcome::NotStarted,
-            "Cell runtime capacity is exhausted",
-            100,
-        ),
-        Error::Fenced
-        | Error::CellNotActive
-        | Error::CellDraining
-        | Error::RuntimeClosed
-        | Error::StreamCancelled
-        | Error::PendingPublication => (
-            wire::error::Code::Unavailable,
-            wire::error::Outcome::NotStarted,
-            "Cell owner is unavailable",
-            100,
-        ),
-        Error::Registry(_) => (
-            wire::error::Code::SchemaIncompatible,
-            wire::error::Outcome::Rejected,
-            "compiled Cell operation is unavailable",
-            0,
-        ),
-        Error::Identity(_) | Error::Command(_) | Error::Peer(_) | Error::PeerDecode(_) => (
-            wire::error::Code::InvalidArgument,
-            wire::error::Outcome::Rejected,
-            "invalid Cell peer request",
-            0,
-        ),
-        Error::Deadline => (
-            wire::error::Code::Unavailable,
-            wire::error::Outcome::Unknown,
-            "Cell operation deadline expired",
-            100,
-        ),
-        Error::PeerSignature(_) => (
-            wire::error::Code::PermissionDenied,
-            wire::error::Outcome::Rejected,
-            "Cell peer authorization failed",
-            0,
-        ),
-        Error::PeerAuthorization(_) => (
-            wire::error::Code::PermissionDenied,
-            wire::error::Outcome::Rejected,
-            "Cell peer principal is not authorized",
-            0,
-        ),
-        Error::Control(_)
-        | Error::Catalog(_)
-        | Error::Node(_)
-        | Error::Release(_)
-        | Error::Backup(_)
-        | Error::Retention(_)
-        | Error::RetentionIo(_)
-        | Error::RetentionWorkerJoin(_)
-        | Error::FollowerIo(_)
-        | Error::FollowerWorkerJoin(_)
-        | Error::PeerTransport { .. }
-        | Error::PeerTransportUnknown { .. }
-        | Error::CatalogCollision
-        | Error::CatalogFull
-        | Error::Json(_)
-        | Error::Codec(_)
-        | Error::Sqlite(_)
-        | Error::Utf8(_)
-        | Error::Storage(_)
-        | Error::Ltx(_)
-        | Error::WorkerStart(_)
-        | Error::WorkerJoin(_)
-        | Error::WorkerPanic
-        | Error::ActivityWorkerStart(_)
-        | Error::ActivityWorkerJoin(_)
-        | Error::ActivityWorkerPanic
-        | Error::ActivityPanic
-        | Error::NativePanic
-        | Error::RuntimeStart(_)
-        | Error::Facility { .. }
-        | Error::CellAlreadyActive => (
-            wire::error::Code::Internal,
-            wire::error::Outcome::Unknown,
-            "Cell runtime failed",
-            100,
-        ),
-    };
-    wire::PeerReply {
-        outcome: Some(wire::peer_reply::Outcome::Error(wire::Error {
-            code: code as i32,
-            outcome: outcome as i32,
-            message: message.into(),
-            retry_after_ms,
-            application_details: Vec::new(),
-        })),
-    }
-}
+pub(crate) use convert::error_reply;
+use convert::*;

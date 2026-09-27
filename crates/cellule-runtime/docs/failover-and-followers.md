@@ -1,6 +1,6 @@
 # Follower durability and warm failover
 
-Cellule implements a Celld-style replicated node log around the existing per-Cell
+Crab implements a Celld-style replicated node log around the existing per-Cell
 SQLite/LTX runtime. The implementation keeps exactly one Cell owner, lets one
 or two other nodes durably retain the owner's recent LTX cuts, and recovers
 those cuts before a successor opens SQLite.
@@ -8,7 +8,7 @@ those cuts before a successor opens SQLite.
 | Document intent | Value |
 | --- | --- |
 | Content type | Low-level target design |
-| Audience | `cellule-ltx`, `cellule-runtime`, and the embedding service implementers |
+| Audience | `cellule-ltx`, `cellule-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
 | Status | Follower durability, bounded recovery, follower-affine takeover, local fast paths, and digest-bound qualification implemented; protected scale, provider, and release runs remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
@@ -29,6 +29,11 @@ The follower tier is a **durability log**, not a second SQLite owner.
 This distinction preserves one writer while removing object-store upload
 latency from the common response path. It does not create read replicas, allow
 follower reads, or permit a secondary to accept writes.
+The separate read-only exact-root query capability in
+[Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+has a private peer query path and an explicit public issue-detail route in object
+durability mode. Other product reads still use the owner. It is independent of follower durability. A durability-log
+follower still cannot answer SQL queries or promote without the Cell control CAS.
 
 ```mermaid
 flowchart LR
@@ -50,9 +55,9 @@ flowchart LR
     Bucket -->|root CAS proven| Reply
 ```
 
-Cellule targets Celld's public behavior: a write can complete after a fleet proof
+Crab targets Celld's public behavior: a write can complete after a fleet proof
 or an object-store proof; a takeover must recover an earlier fleet proof before
-restore. Cellule retains its own verified manifests, BLAKE3 identities, exact-root
+restore. Crab retains its own verified manifests, BLAKE3 identities, exact-root
 controls, `cellule-store` adapters, and Rust-native runtime.
 
 ## Preserve these guarantees
@@ -137,7 +142,7 @@ cellule-runtime
   Cell recovery-overlay attachment and consumption
   bounded admission, shutdown, metrics, and fault injection
 
-the embedding service
+crab-http-server
   construct the runtime from existing storage and peer configuration
   expose private mTLS append, seal, and tail routes
   order startup/readiness/drain and map typed errors to public HTTP
@@ -145,7 +150,7 @@ the embedding service
 ```
 
 `cellule-ltx` must not select nodes, own leases, authorize peers, or decide when an
-HTTP response is safe. the embedding service must not parse LTX or create a second
+HTTP response is safe. `crab-http-server` must not parse LTX or create a second
 recovery path.
 
 ### Implementation checkpoint
@@ -313,7 +318,7 @@ state transitions change.
 
 There is one canonical format at every commit. Development environments may be
 discarded and recreated when that format changes. There is no dual write,
-fallback reader, compatibility branch, or data migration until Cellule ships a
+fallback reader, compatibility branch, or data migration until Crab ships a
 persistent Cell format that explicitly requires those guarantees.
 
 This applies to both the `cells/v1` path and the `version: 1` fields inside its
@@ -883,7 +888,7 @@ This is an intentional throughput-versus-complexity decision:
 
 #### Revisit result: keep the bounded pipeline
 
-The dual-watermark pipeline remains the best Cellule trade-off and is implemented,
+The dual-watermark pipeline remains the best Crab trade-off and is implemented,
 so it is not a remaining delivery item. It pays for one extra monotonic
 watermark and one bounded queue to remove object-store latency from consecutive
 commands. It deliberately stops before a general publication graph: one actor,
@@ -902,7 +907,7 @@ scheduler, second writer, or publication head. Any future body adapter must
 delegate to this gate rather than bypassing its receipt and lease checks.
 
 The dual-watermark model earns its extra state only because it changes current
-command throughput. It is the narrowest design that gives Cellule all three of
+command throughput. It is the narrowest design that gives Crab all three of
 these properties:
 
 1. The next command does not wait for object-store latency after fleet fsync.
@@ -923,7 +928,7 @@ drained:   published_head == logical_head
 fenced:    stop output; preserve the interval for takeover
 ```
 
-This choice fits Cellule because object stores have materially higher and more
+This choice fits Crab because object stores have materially higher and more
 variable latency than an in-fleet fsync, while the exact-root CAS must remain
 serial. A general multi-publisher graph would add conflict resolution without
 improving the one-writer SQLite execution path.
@@ -960,7 +965,7 @@ the producer can observe:
 
 Celld uses the third rule: one response release is insufficient because the
 producer continues after the head and a later chunk can reveal a later commit.
-`CellStateStream` applies that same rule to Cellule's Rust state-observing API.
+`CellStateStream` applies that same rule to Crab's Rust state-observing API.
 
 ```mermaid
 sequenceDiagram
@@ -1043,7 +1048,7 @@ This narrow API avoids a second speculative queue or stream scheduler. It does
 not weaken the contract: introducing a state-observing body without the phase 8
 gate is a correctness regression, not an optional optimization.
 
-The server now exposes `cellule_http_server::state_observing_body` as the narrow
+The server now exposes `crab_http_server::state_observing_body` as the narrow
 HTTP adapter. It consumes one input only after the previous body chunk has
 completed, invokes `CellStateStream::emit` before encoding each chunk, maps
 stream errors to body I/O errors, cancels on body drop, and owns no queue or
@@ -1223,7 +1228,10 @@ After acquiring the Cell, the new owner loads the pinned overlay, prepares its
 exact successor, and publishes that successor through the control CAS:
 
 ```rust,ignore
-let observed = /* latest VersionedControl loaded from authority */;
+let observed = authority
+    .load(cell_id)
+    .await?
+    .ok_or(Error::CellNotActive)?;
 let control = observed.value();
 let recovery_ref = control
     .recovery
@@ -1486,7 +1494,7 @@ forge a release token. `FencedNodeSession` converts directly to
 proof is emitted only after every recovered overlay is pinned and the session
 log is CASed to `sealed`.
 
-### the embedding service
+### `crab-http-server`
 
 The server installs one transport and follower store into `CellRuntimeBuilder`.
 Private route handlers authenticate and decode, then call those objects. They do
@@ -1497,24 +1505,42 @@ not access Cell actors or execute application commands.
 Prometheus metrics must remain bounded in cardinality:
 
 ```text
-cellule_cell_durability_proofs_total{source="fleet|object"}
-cellule_cell_durability_wait_seconds{source="fleet|object"}
-cellule_cell_node_log_append_bytes_total{result="acked|nacked"}
-cellule_cell_node_log_uncovered_bytes
-cellule_cell_node_log_lanes{state="open|degraded|sealed"}
-cellule_cell_node_log_recoveries{state="running|waiting"}
-cellule_cell_node_log_recovery_seconds
-cellule_cell_node_log_recovery_phase_seconds{phase="claim|witness|scope_validation|pin_attach|seal"}
-cellule_cell_node_log_recovery_failures_total{reason}
-cellule_cell_node_log_recovery_work_total{kind="candidate_count|affected_cells|catalog_shards|catalog_pages|control_reads|follower_pages|follower_frames|follower_bytes|peer_requests|bundle_bytes|object_reads|object_writes"}
-cellule_cell_node_log_rotations_total{result="started|pending|failed|completed"}
-cellule_cell_follower_retained_bytes
-cellule_cell_session_lease_seconds
-cellule_cell_self_fences_total{reason}
+crab_cell_durability_proofs_total{source="fleet|object"}
+crab_cell_durability_submissions_total{outcome="fleet|unsupported|unavailable|rejected"}
+crab_cell_durability_wait_seconds{source="fleet|object"}
+crab_cell_command_responses_total{source="recorded|fleet|object"}
+crab_cell_command_response_seconds{source="recorded|fleet|object"}
+crab_cell_command_confirmation_seconds{source="recorded|fleet|object"}
+crab_cell_node_log_append_bytes_total{result="acked|nacked"}
+crab_cell_node_log_uncovered_bytes
+crab_cell_node_log_lanes{state="open|degraded|sealed"}
+crab_cell_node_log_recoveries{state="running|waiting"}
+crab_cell_node_log_recovery_seconds
+crab_cell_node_log_recovery_phase_seconds{phase="claim|witness|scope_validation|pin_attach|seal"}
+crab_cell_node_log_recovery_failures_total{reason}
+crab_cell_node_log_recovery_work_total{kind="candidate_count|affected_cells|catalog_shards|catalog_pages|control_reads|follower_pages|follower_frames|follower_bytes|peer_requests|bundle_bytes|object_reads|object_writes"}
+crab_cell_node_log_rotations_total{result="started|pending|failed|completed"}
+crab_cell_follower_retained_bytes
+crab_cell_session_lease_seconds
+crab_cell_self_fences_total{reason}
 ```
 
 Cell ID, repository name, request ID, session ID, and object digest belong in
 structured logs or bounded administrative queries, never metric labels.
+
+Command responses count once at the final runtime reply boundary. `fleet` or
+`object` records the proof that released a new commit; `recorded` means a
+previously durable result was replayed. Later object publication can increment
+the proof counters without adding another response. Runtime errors and dropped
+receivers add no response; a durable application rejection is still a returned
+outcome. The same boundary covers effect delivery. Queries and migrations use
+separate paths and are excluded.
+
+Response duration starts at admitted enqueue and includes actor queueing,
+execution, capture, proof, and final worker confirmation. The confirmation
+histogram isolates that last worker wait and is zero for recorded results.
+These metrics exclude HTTP/peer transport and cannot alone establish public
+action latency or sustained publisher drain.
 
 The current server wiring emits durability-proof and follower-append events
 through `CellTelemetry`; it samples the signed node-log phase and session-lease
@@ -1522,6 +1548,15 @@ remaining time, and records recovery duration and bounded failure class from the
 scheduler. Recovery `waiting` counts candidates in the bounded retry delay; it
 does not include sessions that have not yet been observed by this scheduler and
 must not be inferred from a saturated worker count.
+
+Every captured commit also reports how its node-log submission resolved.
+`fleet` means an enrolled lane accepted the commit for shipping, while
+`unsupported` (this host installs no provider), `unavailable` (a provider exists
+without an enrolled lane), and `rejected` (the enrolled lane fenced or refused
+the submission) all describe commits that still succeed through object coverage.
+Those three outcomes are the only signal that a node intended fleet durability
+and silently fell back, so alert on them instead of inferring durability from
+commit success.
 
 `cells status --owner OWNER --name REPOSITORY --json` reports from persistent
 control and signed node-session state:
@@ -1675,9 +1710,9 @@ The pinned Celld design establishes the pattern used here:
 - [Celld output gate](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/logic/output_gate.rs)
   gates the response head and each later state-observing stream chunk.
 
-Cellule must prove its own version because its control model differs. Celld can
-restore discoverable epoch prefixes. Cellule restores one authenticated root, so
+Crab must prove its own version because its control model differs. Celld can
+restore discoverable epoch prefixes. Crab restores one authenticated root, so
 it additionally needs the control-pinned recovery overlay described above.
-That difference is intentional: it preserves Cellule's verified manifests,
+That difference is intentional: it preserves Crab's verified manifests,
 checksums, exact-root backup, and existing storage dependencies while matching
 Celld's follower durability and takeover behavior.

@@ -112,7 +112,7 @@
 
   <rect x="865" y="505" width="105" height="70" rx="8" fill="#0f172a"/>
   <rect x="865" y="505" width="105" height="70" rx="8" fill="rgba(6,78,59,0.45)" stroke="#34d399" stroke-width="1.5"/>
-  <text x="917.5" y="533" class="name">crab-ltx</text>
+  <text x="917.5" y="533" class="name">cellule-ltx</text>
   <text x="917.5" y="552" class="detail">capture · verify</text>
 
   <!-- Object-store origin -->

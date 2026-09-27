@@ -167,17 +167,38 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
     let install = host
         .run(move || {
             filesystem.persist_file_new(&source, &destination)?;
-            Ok::<_, LtxError>(())
+            // A dispatched install can finish after its async waiter is
+            // cancelled. The returned guard removes that unclaimed file.
+            Ok::<_, LtxError>(InstalledRestore {
+                filesystem,
+                destination,
+                retained: false,
+            })
         })
         .await;
     host.observe_ltx_phase(
         crate::LtxPhase::RestoreWrite,
         install_started,
-        matches!(&install, Ok(Ok(()))),
+        matches!(&install, Ok(Ok(_))),
     );
-    install??;
+    let mut installed = install??;
+    installed.retained = true;
     scratch.installed = true;
     Ok(database.position)
+}
+
+struct InstalledRestore {
+    filesystem: Arc<dyn crate::environment::FileSystem>,
+    destination: PathBuf,
+    retained: bool,
+}
+
+impl Drop for InstalledRestore {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = self.filesystem.remove_file(&self.destination);
+        }
+    }
 }
 
 struct RestoreScratch {
@@ -202,7 +223,7 @@ impl RestoreScratch {
         for _ in 0..16 {
             let mut scratch_name = filename.to_owned();
             scratch_name.push(format!(
-                ".cellule-restore-{}-{}",
+                ".crab-restore-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));

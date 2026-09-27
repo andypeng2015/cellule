@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "SQLite WAL capture, LTX replication, and verified recovery"
+description = "SQLite LTX capture, object-store replication, and verified recovery for Cellule"
 
 [features]
 default = []
@@ -30,8 +30,13 @@ futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 object_store = { workspace = true, features = ["fs"] }
+proptest = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [[example]]
 name = "rustfs_cell_replica_scale_load"
+required-features = ["replica"]
+
+[[example]]
+name = "power_cut_probe"
 required-features = ["replica"]

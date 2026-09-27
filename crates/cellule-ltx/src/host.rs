@@ -104,7 +104,7 @@ pub(crate) struct HostMetadata {
 impl LtxHost {
     pub fn check_database_size(&self, size: u64) -> crate::Result<()> {
         if size > self.max_database_bytes {
-            return Err(crate::LtxError::Limit("database bytes"));
+            return Err(crate::LtxError::Limit(crate::LimitKind::DatabaseBytes));
         }
         Ok(())
     }

@@ -40,7 +40,7 @@ jobs:
       - name: Run production hot-path preflight guards
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cellule-runtime-qualification-target
-        run: cargo test -p cellule-runtime --test qualification_preflight --locked
+        run: cargo test -p cellule-runtime --test qualification preflight --locked
       - name: Verify application and host boundaries
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cellule-runtime-qualification-target

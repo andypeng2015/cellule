@@ -1,11 +1,11 @@
-# Deploy and operate a Cell-enabled Cellule fleet
+# Deploy and operate a Cell-enabled Crab fleet
 
-Run one service process per Kubernetes Pod or virtual machine. Nodes share one object-store origin, forward private requests over mutual TLS (mTLS), and advertise release and capacity state in the origin.
+Run one `crab-http-server` process per Kubernetes Pod or virtual machine. Nodes share one object-store origin, forward private requests over mutual TLS (mTLS), and advertise release and capacity state in the origin.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | How-to and operations reference |
-| Audience | Cellule operators and release engineers |
+| Audience | Crab operators and release engineers |
 | Goal | Configure, size, roll out, drain, restore, and observe a Cell fleet |
 
 [Back to the Cell runtime index](README.md)
@@ -17,16 +17,64 @@ public traffic. Object-root publication remains a valid alternative proof, and
 all recovery still goes through the existing claim, witness, pin, control-CAS,
 and fresh-database activation gates described in
 [Follower durability and warm failover](failover-and-followers.md).
+Owner queries remain the default. In object durability mode, the server
+reconciles a desired-reader policy and serves explicit authenticated reads
+from admitted, verified snapshots. The issue-detail route below is the first
+public product consumer. This is local implementation evidence for
+[Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md),
+not a qualified production deployment. Fleet-only acknowledgements do not
+provide the plan's all-secondary-loss guarantee.
+
+An administrator can set a repository Cell's desired read-replica count with
+`PUT /api/repos/{owner}/{name}/settings/read-replicas`, sending
+`{"expected_revision":0,"desired_readers":1}` for the first policy and the
+returned revision for later changes. `GET` on the same path returns the current
+target and revision. A successful update means the S3 policy CAS completed;
+the update's `convergence` field is `pending`. `GET` probes the selected nodes
+and reports selected, proven-ready, and unverified reader counts plus the
+lowest proven sequence. Readiness probes use at most 16 concurrent requests
+inside a five-second budget and do not activate views. Failed or timed-out
+probes remain unverified; a selected-node count below the target is a placement
+`shortfall`. The server sends an authenticated owner hint after the
+CAS and also reconciles owned Cells periodically. A stale revision returns
+HTTP 409. This API is available only in the object durability profile.
+
+For repository issue detail, `GET /api/repos/{owner}/{name}/issues/{number}?read=replica`
+selects an admitted reader and returns `x-crab-cell-reader`,
+`x-crab-cell-incarnation`, and `x-crab-cell-sequence` headers naming the
+serving node and the issue query's observed position. Supply
+both `after_incarnation` (32 lowercase hex digits) and `after_sequence` on a
+later replica request to require at least that position. The route reports
+`replica_behind` (409) or `replica_unavailable` (503) and never runs the issue
+query on the owner as a fallback. The default issue route still reads from the
+owner. Issue and label metadata use one typed query against the same snapshot; assignee metadata comes from the authorized repository configuration.
+
+After the owner session expires, verified snapshots remain warm but cannot
+answer queries. Recovery probes the selected live nodes and prefers a warm
+reader, after any mandatory durability-log successor. The destination closes
+reader admission, proves predecessor death, wins the normal Cell-control CAS,
+and opens a fresh writable database from the authoritative root. It never
+turns a read-only connection into a writer. A missing warm reader only removes
+the placement preference; the existing cold recovery path retains every
+session, old-log, and authority gate.
+
+On shutdown, the host cancels work producers and closes reader admission,
+then drains accepted runtime work and seals the covered node log. This includes
+admitted replica SQL and snapshot-open jobs whose callers were cancelled.
+Heartbeat maintenance remains live through that barrier. Session withdrawal follows
+runtime drain; withdrawing earlier fences the log authority and prevents a
+clean fleet-to-object transition. Every phase uses the same absolute shutdown
+deadline. A failed drain must not authorize a durability-mode change.
 
 ## Configure one process per node
 
-The embedding service owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.
+The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.
 
 ```mermaid
 flowchart TB
     Public[Public listener<br/>HTTP and Git]
     Management[Management listener<br/>peer mTLS and admin]
-    Server[One service process]
+    Server[One crab-http-server process]
     Volume[(Local SSD cache)]
     Origin[(Object-store authority)]
 
@@ -132,13 +180,13 @@ The 1,000 to 10,000 open-Cell and 1,000 command/s aggregate targets require [cap
 
 ## Build one canonical release
 
-The deployable unit is the complete service image.
+The deployable unit is the complete `crab-http-server` image.
 
 ```text
 Rust modules + migrations + Cargo.lock + React assets
                          |
                          v
-              the embedding service image
+              crab-http-server image
                          |
                          v
              canonical registry descriptor
@@ -149,7 +197,7 @@ The descriptor includes:
 | Field | Contract |
 | --- | --- |
 | `version` | Integer `1` |
-| `runtime` | the embedding service |
+| `runtime` | `crab-http-server` |
 | `peer_versions` | Sorted unique versions; V1 supports `1` |
 | `modules` | At most 128 canonical module entries |
 | `namespaces` | At most 128 stable namespace entries |
@@ -162,16 +210,16 @@ The descriptor has a 256 KiB limit. Its BLAKE3 digest identifies the compiled re
 The administrative commands operate through the existing server binary:
 
 ```text
-the embedding service --config config.toml cells release inspect --json
-the embedding service --config config.toml cells capacity --json --live
-the embedding service --config config.toml cells release bootstrap --image sha256:1234567890
-the embedding service --config config.toml cells release prepare \
+crab-http-server --config config.toml cells release inspect --json
+crab-http-server --config config.toml cells capacity --json --live
+crab-http-server --config config.toml cells release bootstrap --image sha256:1234567890
+crab-http-server --config config.toml cells release prepare \
   --expected-revision 7 --image sha256:1234567890
-the embedding service --config config.toml cells release activate \
+crab-http-server --config config.toml cells release activate \
   --expected-revision 8 --strategy compatible \
   --minimum-eligible-nodes 3
-the embedding service --config config.toml cells release status
-the embedding service --config config.toml cells status --owner team --name repository
+crab-http-server --config config.toml cells release status
+crab-http-server --config config.toml cells status --owner team --name repository
 ```
 
 The repository status command reads the durable control object without opening
@@ -182,7 +230,7 @@ The capacity command with `--live` reads the startup envelope retained by the
 running server: process memory limit, free local disk, file descriptor limit,
 the configured local-disk limit, CPU-derived job credits, and the resulting
 admission budgets. `disk_capacity_bytes` is the smaller of that limit and the
-backing filesystem total. The limit is Cellule's admission ceiling and, in the
+backing filesystem total. The limit is Crab's admission ceiling and, in the
 Helm deployment, the same byte count configures `emptyDir.sizeLimit`. Without
 `--live`, the command calculates a preflight envelope for its short-lived
 process instead. Neither mode claims a throughput result. Capture the live
@@ -264,7 +312,7 @@ Any matching row keeps the release in maintenance. The runtime doesn't guess pay
 The same fence can reclaim unreachable immutable Cell objects after migration:
 
 ```bash
-the embedding service --config config.toml cells release activate \
+crab-http-server --config config.toml cells release activate \
   --expected-revision 8 \
   --strategy maintenance \
   --retention-grace-hours 168 \
@@ -285,7 +333,13 @@ listed, candidate, reachable, grace, eligible, and deleted counts.
 If eligible objects exceed the selected deletion bound, the command returns an
 incomplete-retention error and deliberately leaves the release in
 `Maintenance`. Repeat the identical activation command and expected revision;
-the operation re-marks authority before deleting the next bounded batch. Start
+the operation re-marks authority before deleting the next bounded batch. Each
+retry selects the same next unused session identity as competing executors;
+conditional creation admits only one. It advances past permanently retired
+identities and never revives a withdrawn session. After advertising, it checks
+the exact maintenance release again before opening any Cell. The executor
+closes its runtime through its owning `CellNode` before collecting objects;
+final host cleanup is idempotent. Start
 the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes
@@ -296,25 +350,25 @@ Use a `Deployment` for stateless process identity and a per-Pod local volume for
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: the embedding service
+  name: crab-http-server
 spec:
   replicas: 3
   template:
     spec:
       terminationGracePeriodSeconds: 180
       containers:
-        - name: cellule
-          image: registry.example/cellule@sha256:1234567890
+        - name: crab
+          image: registry.example/crab@sha256:1234567890
           args:
             - --config
-            - /etc/cellule/server.toml
+            - /etc/crab/server.toml
             - --peer-advertise-host
-            - $(CELLULE_POD_IP)
+            - $(CRAB_POD_IP)
           readinessProbe:
             exec:
-              command: [cellule-server, --config, /etc/cellule/server.toml, healthcheck]
+              command: [crab-http-server, --config, /etc/crab/server.toml, healthcheck]
           volumeMounts:
-            - { name: cell-cache, mountPath: /var/lib/cellule }
+            - { name: cell-cache, mountPath: /var/lib/crab }
 ```
 
 The snippet shows topology, not a complete production manifest. The shipped
@@ -369,11 +423,11 @@ every referenced object verifies. Restore verifies that pin before copying.
 Create a nonzero 16-byte pin ID and verify it independently:
 
 ```bash
-the embedding service --config /etc/cellule/server.toml cells backup create \
+crab-http-server --config /etc/crab/server.toml cells backup create \
   --pin 11112222333344445555666677778888
-the embedding service --config /etc/cellule/server.toml cells backup verify \
+crab-http-server --config /etc/crab/server.toml cells backup verify \
   --pin 11112222333344445555666677778888
-the embedding service --config /etc/cellule/server.toml cells backup restore \
+crab-http-server --config /etc/crab/server.toml cells backup restore \
   --pin 11112222333344445555666677778888 \
   --destination-prefix recovery/restore-2026-09-16
 ```

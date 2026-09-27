@@ -1,11 +1,11 @@
-# Add a native Rust service to Cellule
+# Add a native Rust service to Crab
 
-Cellule services are statically linked Rust modules. A module declares stable schemas, operation IDs, codecs, namespaces, workflow definitions, and activities; the embedding service freezes that inventory before readiness.
+Crab services are statically linked Rust modules. A module declares stable schemas, operation IDs, codecs, namespaces, workflow definitions, and activities; `crab-http-server` freezes that inventory before readiness.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | How-to and API reference |
-| Audience | Cellule feature contributors |
+| Audience | Crab feature contributors |
 | Goal | Add one typed product feature and deploy it through the existing server |
 
 [Back to the Cell runtime index](README.md)
@@ -18,9 +18,9 @@ The server is the only composition root. Repository owners cannot upload executa
 flowchart LR
     Source[Rust module + migration]
     Registry[RegistryBuilder]
-    Binary[the embedding service image]
+    Binary[crab-http-server image]
     Descriptor[Canonical release descriptor]
-    Fleet[Compatible Cellule fleet]
+    Fleet[Compatible Crab fleet]
 
     Source --> Registry --> Binary
     Registry --> Descriptor
@@ -37,7 +37,7 @@ The runtime intentionally excludes:
 - Public primitive SDKs
 - Per-repository executable bundles
 
-A separate workspace crate may organize domain code, but the embedding service still owns registration, authentication, routing, and lifecycle.
+A separate workspace crate may organize domain code, but `crab-http-server` still owns registration, authentication, routing, and lifecycle.
 
 ## Declare a module descriptor
 
@@ -70,6 +70,17 @@ The registry rejects:
 - Undeclared effect targets
 - Queue dead-letter cycles
 - Missing workflow definitions or activity bindings
+
+The bounds are part of the contract:
+
+| Field | Bound |
+| --- | --- |
+| Build source revision | 1-128 characters, with a nonzero lock digest |
+| Modules per build | 1-128 |
+| Namespaces per build | At most 128, each with a 1-128 character name and 1-4096 shards that are a power of two |
+| Module schema range | `schema_min` at least 1, `schema_max` at least `schema_min`, nonzero source digest |
+| Migration SQL | Nonempty, at most 1 MiB, contiguous from `schema_min`, digest-bound |
+| Operation input and output limits | 1 byte to the wire bound (4 MiB + 64 KiB) |
 
 Registration order does not change canonical release bytes.
 
@@ -141,6 +152,13 @@ Decoding rejects trailing bytes, invalid tags, noncanonical floating-point value
 
 `QueryContext` exposes the Cell ID, commit sequence, logical timestamp, and bounded read-only SQL.
 
+Command and query timestamps are at least the logical time persisted in the
+Cell snapshot. This includes forwarded commands, effect delivery, and explicit
+replica queries: a backward clock sample cannot hide already-due work or expose
+values that expired before that committed time. Queries do not advance persisted
+time. Request expiry and owner/session fencing continue to use their own clock
+and lease checks.
+
 Contexts do not expose database paths, raw object storage, control records, HTTP clients, or transaction commit methods.
 
 ## Call a command through CellClient
@@ -204,13 +222,13 @@ stream.finish();
 ```
 
 Each `emit` passes the preceding `Receipt` as the next minimum watermark. An
-HTTP routes use `cellule_http_server::state_observing_body` to send a chunk only
+HTTP routes use `crab_http_server::state_observing_body` to send a chunk only
 after `emit` returns; it must not read the Cell handle or logical head directly.
 The helper serializes input consumption and cancels the stream when the body is
 dropped. A custom adapter can call `stream.cancellation().cancel()` from a
 disconnect handler to wake a pending emission.
 
-## Keep HTTP policy in the embedding service
+## Keep HTTP policy in crab-http-server
 
 A route adapter performs product concerns before invoking the runtime.
 
@@ -272,7 +290,7 @@ The supervisor validates the exact published lease, heartbeats through durable c
 
 ## Forward only private registered messages
 
-The peer protocol is private to compatible Cellule nodes. [`contracts/peer.proto`](contracts/peer.proto) defines messages but no generated public service.
+The peer protocol is private to compatible Crab nodes. [`contracts/peer.proto`](contracts/peer.proto) defines messages but no generated public service.
 
 ```mermaid
 sequenceDiagram
@@ -290,6 +308,25 @@ sequenceDiagram
 ```
 
 The protocol permits at most two forwarding hops. Mutation retries happen only when transport proves the first attempt did not start. Ambiguous attempts use `Resolve`.
+
+Commands, queries, and mutation resolution carry a signed expected Cell ID,
+incarnation, code digest, and schema. The receiver compares all four with its
+resolved owner handle before execution or ledger lookup; actor admission still
+fences ownership changes after resolution. A stale observation returns a
+not-started refusal. It cannot authorize a different Cell or schema.
+
+A host that already read this description from Cell authority can bind one
+routed request with `CellClient::with_observed_description`. This avoids the
+extra peer `Describe` round trip. The binding is specific to that Cell and
+does not refresh itself: after refusal, resolve a fresh route and retain any
+pending mutation's original identity and digest. Other clients obtain the
+description through their transport. Effect delivery retains its destination
+incarnation and durable inbox contract; migration already carries both source
+and successor code/schema.
+
+These required fields revise the unshipped private wire contract. Compatible
+application rollout tests use nodes implementing the same peer contract;
+older private binaries that omit or reject these fields cannot participate.
 
 Native SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect operations
 cross this private boundary as registered `CellCommand`/`CellQuery` codecs.

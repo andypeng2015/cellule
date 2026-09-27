@@ -5,27 +5,29 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Embedded Cell runtime for distributed Rust applications"
+description = "Embedded SQLite Cell runtime contracts for Cellule"
 
 [[bin]]
 name = "cell_movement_probe"
 path = "src/bin/cell_movement_probe.rs"
-required-features = ["process-test-support"]
+required-features = ["test-support"]
 
 [features]
 default = []
-process-test-support = ["cellule-store/test-support"]
+test-support = ["dep:async-trait", "dep:fs4"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 blake3.workspace = true
 bytes.workspace = true
 cellule-store.workspace = true
 cellule-ltx = { workspace = true, features = ["replica"] }
 ed25519-dalek.workspace = true
+fs4 = { version = "0.13", optional = true }
 futures-util.workspace = true
 object_store.workspace = true
 prost.workspace = true
-rusqlite = { workspace = true, features = ["hooks"] }
+rusqlite = { workspace = true, features = ["hooks", "blob"] }
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
@@ -41,5 +43,5 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 async-trait.workspace = true
-cellule-store = { workspace = true, features = ["test-support"] }
+proptest = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

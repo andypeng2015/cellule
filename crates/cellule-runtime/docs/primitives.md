@@ -152,14 +152,19 @@ stateDiagram-v2
     Leased --> Done: ack with token
     Leased --> Ready: retry or lease expiry
     Leased --> Leased: extend with token
-    Ready --> DeadLetter: attempt limit
-    Ready --> Expired: retention limit
+    Ready --> DeadLetter: attempt limit or retention limit
     DeadLetter --> [*]: effect acknowledged
     Done --> [*]: retention cleanup
-    Expired --> [*]: retention cleanup
 ```
 
 The claim command publishes its lease before returning payloads. Consumers validate the exact token at the claim receipt before starting external work.
+
+A ready message past its retention limit is dead-lettered rather than dropped:
+the expire class moves it to `DeadLetter` with its payload, and the configured
+dead-letter target receives a typed effect when one is registered. The retention
+class runs before that transition inside one Tick, so a dead-lettered message is
+removed by the cleanup on a later Tick once its effect has settled — terminal
+rows therefore stay observable for at least one Tick.
 
 | Queue contract | Limit or behavior |
 | --- | --- |
@@ -186,7 +191,7 @@ Queue controls are shard-scoped and use the same request ledger as sends and lea
 `BlobNamespace<M>` hashes the object key to a stable shard. Multipart upload
 metadata, part digests, the published manifest, request outcomes, and LTX state
 commit in one SQLite transaction domain; part bytes are immutable,
-content-addressed objects in the configured Cellule object store. A completed
+content-addressed objects in the configured Crab object store. A completed
 manifest never points at an unrecorded part reference, and range reads verify
 each object-store part before returning bytes after restore or failover.
 
@@ -236,6 +241,14 @@ The destination receives `CronInvocation`, which includes schedule ID, generatio
 | Catch-up | One durable occurrence at a time, bounded by Tick budget |
 | Delivery | Durable effect with destination inbox deduplication |
 | Controls | Upsert, pause, resume at an explicit time, delete |
+
+A schedule is a fixed interval plus an explicit first due time. Cron
+expressions and time zones are not part of this contract: `Upsert` takes
+`interval_ms` inside the interval bounds above and every fire advances the
+schedule by exactly one interval. An application that needs calendar semantics
+computes the next due time itself and resumes the schedule at that instant with
+the documented controls, so the expression dialect and zone database stay above
+the primitive.
 
 Blob upload lifetime and Cron's first-due window are evaluated from the
 mutation's issued timestamp. The serialized Cell still rejects a Blob upload
@@ -342,6 +355,17 @@ The delivery path preserves these properties:
 - `Resolve` recovers an ambiguous destination result
 
 The design doesn't claim an atomic transaction across source and destination. It provides durable at-least-once delivery with idempotent destination execution.
+
+| Effect contract | Limit or behavior |
+| --- | --- |
+| Encoded input | At most 1 MiB; claim and acknowledgement budgets reserve their fixed overhead inside the same bound |
+| Claim batch | 1 to 32 effects per claim |
+| Lease | 5s to 300s, and an extension stays inside the same bounds |
+| Attempts | 20, after which the effect fails instead of retrying |
+| Effect lifetime | At most 7 days from emission; a longer requested expiry is rejected |
+| Inbox retention | 7 days past the effect's own expiry, then the destination inbox drops the record |
+| Destination | Same tenant and application; a cross-tenant target fails before any write |
+| Delivery | At least once, with idempotent destination execution |
 
 ## Let the scheduler advance time-based state
 
