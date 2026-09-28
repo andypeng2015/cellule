@@ -75,8 +75,8 @@ impl CellApplication for OrdersApp {
 The module name, namespace ID, role, shard count, migrations, and operation
 IDs become descriptor contracts. After compiling the application and starting
 a Cell owner, `ApplicationHandle::<OrdersApp>` exposes a typed `SqlCell<Orders>`
-handle. The [application guide](crates/cellule-app/docs/README.md) covers the
-full authoring API and topology choices.
+handle. The [API guide](docs/api.md) maps the public Rust surface; the
+[application guide](crates/cellule-app/docs/README.md) covers topology choices.
 
 ## Commit, then read at the receipt
 

@@ -91,6 +91,8 @@ CELLULE_PERF_ITERATIONS=1 cargo test -p cellule-app --test integration \
   --locked -- --ignored --exact --nocapture
 ```
 
-See [embedding](embedding.md) for serving-node startup and shutdown, and
+Continue with the [Cellule API guide](api.md) for typed capabilities,
+receipts, read policies, and outcome handling. See [embedding](embedding.md) for
+serving-node startup and shutdown, and
 [qualification](../crates/cellule-runtime/qualification/README.md) for the
 provider and fault evidence required beyond these local tests.

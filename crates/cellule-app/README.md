@@ -14,6 +14,7 @@ flowchart LR
 
 | Guide | Topic |
 | --- | --- |
+| [API guide](../../docs/api.md) | Compile an application, bind handles, invoke commands, and handle outcomes. |
 | [Topology](docs/topology.md) | Stable IDs, shards, entity partitions, and descriptors. |
 | [Invocations](docs/invocation.md) | Typed clients, read policy, and receipts. |
 | [Examples and tests](docs/examples.md) | Runnable paths and proof levels. |
