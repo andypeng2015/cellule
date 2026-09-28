@@ -15,7 +15,7 @@
   <text x="72" y="123" class="label">Describe</text>
   <text x="44" y="158" class="detail">Register module + Cell type</text>
   <text x="44" y="179" class="detail">Compile stable descriptor</text>
-  <text x="44" y="201" fill="#6ee7b7" font-size="9">application_descriptor.rs</text>
+  <text x="44" y="201" fill="#6ee7b7" font-size="9">basic.rs</text>
   <rect x="281" y="94" width="224" height="126" rx="10" fill="#18354b" stroke="#60a5fa" stroke-width="1.5"/>
   <circle cx="305" cy="117" r="13" fill="#60a5fa"/><text x="305" y="121" class="num" text-anchor="middle">2</text>
   <text x="325" y="123" class="label">Start</text>

@@ -65,10 +65,11 @@ Changing them can change routing or persisted identity. Read the
 [topology guide](../crates/cellule-app/docs/topology.md) before changing a
 released descriptor.
 
-The [application descriptor example](../crates/cellule-app/examples/application_descriptor.rs)
-shows a complete `CellModule` and `ApplicationBuilder::finish`. Its
-`BuildDescriptor` records a source revision and Cargo lock digest. For the
-trait-based path, use `CellApplication::compile(build)`.
+The [basic example](../crates/cellule-app/examples/basic.rs) declares KV and
+Queue modules, compiles them through `CellApplication::compile(build)`, and
+uses both through typed handles. Its `BuildDescriptor` records a source
+revision and Cargo lock digest. The separate
+[orders example](../crates/cellule-app/examples/orders.rs) shows a SQL module.
 
 ### What a module descriptor freezes
 
@@ -203,14 +204,16 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
   returned row and drains the runtime.
 - **KV:** use one scope in `KvAtomicRequest` to combine checks and mutations,
   then `get` or `list` on its derived shard. A returned version can be used in
-  the next conditional request.
+  the next conditional request. The [basic example](../crates/cellule-app/examples/basic.rs)
+  writes a setting and reads at its receipt.
 - **Blob:** `Begin`, `PutPart`, then `Complete` with separate mutation
   identities; read the object at the completion receipt. The
   [attachments example](../crates/cellule-app/examples/attachments.rs) also
   verifies the bytes and content type.
 - **Queue:** `send` with a producer identity, `claim` from a chosen shard,
   validate that exact claim on the owner, then `ack`, `retry`, or `extend`
-  using its message ID and token. Delivery is at least once.
+  using its message ID and token. Delivery is at least once; the
+  [basic example](../crates/cellule-app/examples/basic.rs) demonstrates the lease path.
 - **Cron:** `mutate` a schedule, inspect it with `get`, and let the installed
   maintenance runner perform due ticks. A schedule declaration does not by
   itself start a service scheduler.

@@ -2,7 +2,7 @@
 
 | Path | Proves |
 | --- | --- |
-| [`application_descriptor.rs`](../examples/application_descriptor.rs) | Module registration, Cell topology, and descriptor compilation. |
+| [`basic.rs`](../examples/basic.rs) | Compile KV and Queue Cells, write/read a setting, claim and acknowledge a job. |
 | [`orders.rs`](../examples/orders.rs) | Local SQL write, published receipt, and read-back. |
 | [`attachments.rs`](../examples/attachments.rs) | Multipart Blob upload, published receipt, and read-back. |
 | [`contracts.rs`](../tests/contracts.rs) | Identity, descriptor, and digest contracts. |
@@ -10,7 +10,7 @@
 | [Performance scenarios](../PERFORMANCE.md) | Workload commands and environment boundaries. |
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
 cargo test -p cellule-app --locked

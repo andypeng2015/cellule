@@ -20,15 +20,15 @@ Use Rust **1.97 or newer**. From the workspace root, run these local examples;
 they use temporary SQLite files and in-memory object storage:
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
 ```
 
-The first command compiles a descriptor without starting a Cell. The others
-print `order 42 total: 1999 cents` and
-`attachment stored: receipt for order 42` after a durable write and a
-receipt-bound read. No cloud credentials are needed. Follow the
+`basic` compiles two Cell types, starts a KV Cell and a Queue Cell, then writes
+and reads a setting and claims and acknowledges a job. `orders` shows SQL;
+`attachments` shows Blob. Each example uses durable commands and typed handles.
+No cloud credentials are needed. Follow the
 [step-by-step quickstart](docs/quickstart.md) for expected output and a local
 recovery test.
 
@@ -190,7 +190,7 @@ lost, resolve the original request ID before retrying. See
 | Choose typed methods and handle outcomes | [API](docs/api.md) |
 | Understand ownership, storage, and recovery | [Architecture](docs/architecture.md) |
 | Embed Cellule in a serving service | [Framework integration](docs/framework.md) |
-| Find the right crate or test | [Workspace reference](docs/workspace-reference.md) |
+| Find the right crate or test | [Workspace reference](docs/reference.md) |
 | Evaluate current support and gaps | [Roadmap](docs/roadmap.md) |
 | Qualify and publish a matched crate set | [Release guide](docs/releasing.md) |
 

@@ -44,7 +44,7 @@ For SQL Cells addressed directly by canonical 16-byte UUIDs, use
 the 33-byte hashed entity mode. See [Topology](docs/topology.md).
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
 cargo test -p cellule-app --locked

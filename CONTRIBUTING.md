@@ -11,7 +11,7 @@ From the workspace root:
 ```sh
 cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 cargo +1.97.0 check --workspace --all-targets --locked
 cargo test --workspace --all-features --locked
 cargo test -p cellule-ltx --features replica --locked

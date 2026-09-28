@@ -1,7 +1,7 @@
 # Run a Cellule application
 
-This path starts with a descriptor, then runs two local Cells and one recovery
-test. Use Rust **1.97 or newer** and run commands from the workspace root. The
+This path starts two local Cells for KV and Queue, then runs SQL, Blob, and one
+recovery test. Use Rust **1.97 or newer** and run commands from the workspace root. The
 examples use temporary SQLite files and in-memory object storage; no cloud
 credentials are required. On a workstation with the mounted Workspace volume,
 put `CARGO_TARGET_DIR` under `$HOME/Workspace/crabbuild-target` and give each
@@ -9,21 +9,38 @@ checkout its own directory.
 
 | Step | Run | What you should observe |
 | --- | --- | --- |
-| 1 | `application_descriptor` | A compiled application name, one Cell type, and descriptor digest. |
+| 1 | `basic` | Two Cell types, a receipt-bound KV read, and a claimed and acknowledged Queue job. |
 | 2 | `orders` | Order 42 is committed and read back as 1999 cents. |
 | 3 | `attachments` | A Blob receipt is uploaded and read back. |
 | 4 | Focused integration test | All eight primitives survive a local owner recovery. |
 
-## 1. Compile an application descriptor
+## 1. Compile an application and use KV and Queue
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 ```
 
-The [source](../crates/cellule-app/examples/application_descriptor.rs)
-registers a `Repository` module, its SQL namespace and schema migration, and a
-`CellType`. `ApplicationBuilder::finish` checks the module/topology match and
-prints the descriptor digest. No Cell or SQLite worker starts in this step.
+Expected application output includes:
+
+```text
+compiled basic-example with 2 cell types, digest Digest(...)
+setting theme: dark
+queue job: send-email
+```
+
+The [source](../crates/cellule-app/examples/basic.rs) declares `Settings` and
+`Jobs` modules with stable namespace, role, and operation IDs. `BasicApp::compile`
+checks both Cell types against their modules and prints the descriptor digest.
+The example provisions a fenced owner for each Cell, bootstraps managed SQLite,
+and binds both handles to one `ApplicationHandle<BasicApp>`.
+
+`KvNamespace::atomic` writes a setting in one scope; the returned receipt
+gates `get`. `QueueNamespace::send` creates an at-least-once job. The example
+claims a lease, validates it on the owner, and acknowledges the message.
+Use a new request ID for each logical mutation, and keep it stable if that
+mutation needs resolution or a retry.
+In a real worker, perform idempotent external work after validating the claim
+and before acknowledging it; the local example only demonstrates the lease path.
 
 The descriptor is more than a display name: stable namespace, role, shard
 count, migration versions, operation IDs, and source/lockfile digests bind the
@@ -89,6 +106,12 @@ Blob Cell and adds a `BlobArtifactStore` to its application handle. It sends
 `Begin`, `PutPart`, and `Complete` as separately identified mutations. The
 completion receipt gates a `BlobQuery::Read`; the example checks the returned
 bytes and content type. Staging a part alone does not publish an attachment.
+
+These three runnable examples cover SQL, KV, Queue, and Blob. The next
+scenario adds Cron schedules, Workflow decisions, supervised Activities, and
+cross-Cell Effects. These operate outside a single SQL transaction where
+appropriate; the [primitive guide](../crates/cellule-runtime/docs/primitives.md)
+explains their retry and ownership rules.
 
 ## 4. Exercise all primitives and recovery
 

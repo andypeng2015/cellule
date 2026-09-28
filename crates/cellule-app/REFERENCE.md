@@ -40,12 +40,12 @@ fn orders_topology() -> cellule_runtime::Result<CellType> {
 assert!(orders_topology().is_ok());
 ```
 
-For module descriptors and registration, run the [application descriptor example](examples/application_descriptor.rs).
+For module descriptors, registration, KV, and Queue, run the [basic example](examples/basic.rs).
 For a real command and receipt-bound read, run the [orders example](examples/orders.rs).
 For a multipart Blob write and receipt-bound read, run the [attachments example](examples/attachments.rs).
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
 ```

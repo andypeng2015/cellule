@@ -37,8 +37,8 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[example]]
-name = "application_descriptor"
-path = "examples/application_descriptor.rs"
+name = "basic"
+path = "examples/basic.rs"
 
 [[example]]
 name = "orders"

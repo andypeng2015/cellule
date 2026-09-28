@@ -29,7 +29,7 @@ cellule-host → cellule-app → cellule-runtime → cellule-ltx → cellule-sto
 
 | Need | Source |
 | --- | --- |
-| Compile a descriptor without starting a Cell | [Application descriptor example](../crates/cellule-app/examples/application_descriptor.rs) |
+| Compile two Cell types; write KV and claim Queue work | [Basic example](../crates/cellule-app/examples/basic.rs) |
 | Commit SQL, read at a receipt, drain | [Orders example](../crates/cellule-app/examples/orders.rs) |
 | Stage and read Blob content | [Attachments example](../crates/cellule-app/examples/attachments.rs) |
 | Exercise public primitives and recovery | [Application integration suite](../crates/cellule-app/tests/integration.rs) and [primitive suite](../crates/cellule-app/tests/primitives.rs) |
