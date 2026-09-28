@@ -23,7 +23,7 @@ a short integration smoke; sustained capacity remains unqualified.
   published. A CPU cap is not a dedicated physical core: this VM had four
   cores for the complete fleet, driver and object store.
 
-Run the [scaling procedure](../PERFORMANCE.md#constrained-reader-scaling-and-loss)
+Run the [scaling procedure](2026-09-27-qualification-notes.md#constrained-reader-scaling-and-loss)
 with five iterations per initial primitive lane. The reader profile always
 checks thirty queries per selected reader at each stage.
 

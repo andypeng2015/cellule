@@ -65,3 +65,5 @@ provider, and failure callers. Check notices and licenses. Run real SQLite,
 malformed-input, external-vector, process-kill, and sparse-root tests before
 claiming compatibility. Cellule's repository remains the authority for its
 public API and persistence contracts.
+
+The [full upstream history](UPSTREAM-HISTORY.md) retains the detailed synthesis record.

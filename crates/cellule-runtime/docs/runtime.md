@@ -38,3 +38,5 @@ The pure coordination kernel in [`src/coordination/mod.rs`](../src/coordination/
 chooses transitions without I/O. Actor adapters gather observations, call the
 kernel, then execute effects. This separation lets the simulator and TLA+
 model replay the same decisions.
+
+For actor, deadline, takeover, and drain contracts, read the [detailed reference](runtime-detailed.md).

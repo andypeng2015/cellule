@@ -11,3 +11,7 @@
 
 LTX does not choose a Cell owner. [`cellule-runtime`](../../cellule-runtime/docs/README.md)
 selects an exact root through authority CAS.
+
+The [detailed synthesis reference](../REFERENCE.md) preserves the original
+technical explanations and examples. Read it with the current guides when
+changing an existing behavior or persisted contract.

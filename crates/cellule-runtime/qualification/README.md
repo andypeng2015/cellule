@@ -53,3 +53,5 @@ A passing local run proves only its selected path. Record provider, topology,
 resource limits, binary identity, source revision, raw logs, and the exact
 selector for every claim. The [verification guide](../docs/delivery.md) lists
 proof levels and ownership.
+
+The [full original reference](qualification-detailed.md) retains the detailed synthesis record.

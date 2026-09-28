@@ -32,3 +32,5 @@ hydrate missing pages in bounded steps, but cannot use stale activation work.
 See [cellule-ltx recovery](../../cellule-ltx/docs/recovery.md) for the LTX
 mechanics and [cellule-store](../../cellule-store/docs/README.md) for provider
 transport.
+
+For object layouts, immutable graph limits, backup, and retention contracts, read the [detailed reference](storage-detailed.md).

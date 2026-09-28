@@ -52,7 +52,9 @@ def fences(text: str) -> list[tuple[str, int, str]]:
 
 def parses(body: str) -> str | None:
     """Returns the first parse error, or None when the wrapped snippet parses."""
-    wrapped = "fn main() {\n" + body + "\n}\n"
+    # Rustdoc hides setup lines prefixed with `# ` while still compiling them.
+    visible = "\n".join(line[2:] if line.startswith("# ") else line for line in body.splitlines())
+    wrapped = "fn main() {\n" + visible + "\n}\n"
     with tempfile.NamedTemporaryFile("w", suffix=".rs") as file:
         file.write(wrapped)
         file.flush()

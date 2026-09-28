@@ -38,3 +38,5 @@ Application SQL cannot access reserved `sys_`, `kv_`, `blob_`, `queue_`,
 schemas and expose typed capabilities through the registry. See
 [the application guide](../../cellule-app/docs/README.md) for an author-facing
 example and [contract SQL](contracts/runtime.sql) for storage inputs.
+
+For procedure bounds and per-primitive examples, read the [detailed reference](primitives-detailed.md).

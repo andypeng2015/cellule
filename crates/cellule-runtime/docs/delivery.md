@@ -28,3 +28,5 @@ The commands run from the workspace root. The [qualification harness](../qualifi
 separates local contracts from provider and multi-process gates. The
 [historical verification report](../../../docs/verification.md) records the
 original extraction's actual checks; it is not a current production claim.
+
+For test matrix, receipts, provider qualification, and evidence gates, read the [detailed reference](delivery-detailed.md).

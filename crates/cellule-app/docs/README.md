@@ -9,3 +9,7 @@
 
 Applications are statically linked Rust modules. They receive typed execution
 capabilities, not raw authority, storage credentials, or network access.
+
+The [detailed synthesis reference](../REFERENCE.md) preserves the original
+technical explanations and examples. Read it with the current guides when
+changing an existing behavior or persisted contract.

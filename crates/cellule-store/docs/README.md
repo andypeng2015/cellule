@@ -8,3 +8,7 @@
 
 The store reports conflicts and transport failures. It never turns a provider
 write into Cell authority.
+
+The [detailed synthesis reference](../REFERENCE.md) preserves the original
+technical explanations and examples. Read it with the current guides when
+changing an existing behavior or persisted contract.

@@ -32,3 +32,5 @@ Follower selection and replacement must use current enrollment. An absence
 proof is not inferred from a missing object listing. See
 [`src/node`](../src/node) and [`src/follower`](../src/follower) for implementation,
 and [qualification](delivery.md) for failure tests.
+
+For node-log frames, follower selection, recovery overlays, and failure cases, read the [detailed reference](failover-and-followers-detailed.md).

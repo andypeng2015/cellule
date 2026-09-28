@@ -34,3 +34,5 @@ container inspect data, source SHA, binary SHA-256, and cgroup counters. The
 runner fails if the selector executes zero tests or the kernel limit differs.
 See [the Compose file](worker-profile.compose.yaml) and
 [runner](run-worker-profile.sh) for the executable contract.
+
+The [full original reference](worker-profile-detailed.md) retains the detailed synthesis record.

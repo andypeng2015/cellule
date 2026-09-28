@@ -24,9 +24,9 @@ three-node Compose and native three-to-five-process reader replacement.
   The separate native process run used Rust 1.98 and GA RustFS, without
   per-process CPU or memory limits.
 
-Reproduce using the [Compose procedure](../PERFORMANCE.md#three-constrained-compose-nodes)
+Reproduce using the [Compose procedure](2026-09-27-qualification-notes.md#three-constrained-compose-nodes)
 with 30 iterations per primitive lane and the
-[reader-loss command](../PERFORMANCE.md#reader-recruitment-and-process-loss)
+[reader-loss command](2026-09-27-qualification-notes.md#reader-recruitment-and-process-loss)
 with five iterations per lane. Use isolated object prefixes and fresh state.
 
 ## Constrained Compose result
