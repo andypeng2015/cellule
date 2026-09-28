@@ -2,7 +2,7 @@
 
 Use Rust 1.97 or newer. The examples use temporary SQLite files and in-memory
 object storage; no cloud credentials are required. Keep Cargo artifacts in a
-checkout-specific target directory on the Workspace volume on Crab workstations.
+checkout-specific target directory on the Workspace volume on workstations with the mounted Workspace volume.
 
 ## Commit and read an order
 
@@ -69,6 +69,6 @@ CELLULE_PERF_ITERATIONS=1 cargo test -p cellule-app --test reference_application
 ```
 
 See [embedding](embedding.md) for serving-node startup and shutdown,
-[the synthesis ledger](synthesis.md) for API changes from the previous extraction,
+[the historical import record](synthesis.md) for prior API changes,
 and [qualification](../crates/cellule-runtime/qualification/README.md) for the
 provider and fault evidence required beyond these local tests.

@@ -2,7 +2,7 @@
 
 The model checks the coordination protocol, not SQLite bytes, object-store
 providers, cryptographic signatures, or HTTP. Each collapse is intentional and
-must be reviewed when `src/coordination.rs` changes.
+must be reviewed when `src/coordination/mod.rs` changes.
 
 | Rust surface | Model surface | Abstraction | Safety consequence |
 | --- | --- | --- | --- |

@@ -1,5 +1,68 @@
 # Audit LTX latency and sustained publication capacity
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+```mermaid
+flowchart LR
+    Baseline[Recorded workload and revision] --> Measure[Phase-specific measurements]
+    Measure --> Findings[Capture, I/O, cache, and fleet findings]
+    Findings --> Change[Bounded implementation change]
+    Change --> Recheck[Exact recovery and latency recheck]
+    Recheck --> Gate[Qualification decision]
+```
+
+## Navigate this reference
+
+- [Current-head audit: remaining work and evidence](#detail-01)
+- [Priority after the implemented changes](#detail-02)
+- [Architecture decision after this audit](#detail-03)
+- [Findings in execution order](#detail-04)
+- [Safety and proof retained by the audit](#detail-05)
+
+### Jump to a finding
+
+| Finding | Evidence question |
+| --- | --- |
+| [1](#finding-01) | Small LTX bodies pay the multipart protocol cost |
+| [2](#finding-02) | Persistent directory-cache hits perform durable index writes |
+| [3](#finding-03) | Sparse writable activation still reads the complete checksum directory |
+| [4](#finding-04) | Range compaction can do whole-graph metadata work on the publication lane |
+| [5](#finding-05) | Early follower responses do not establish sustainable write throughput |
+| [6](#finding-06) | Bounded I/O does not yet prove foreground latency isolation |
+| [7](#finding-07) | Qualification needs a less favorable payload and arrival model |
+| [8](#finding-08) | Sparse point faults and bulk hydration use the same read-ahead window |
+| [9](#finding-09) | One cold Cell can block unrelated Cells on its SQL worker |
+| [10](#finding-10) | Published-cut cleanup occupies the SQL worker after durability |
+| [11](#finding-11) | Long-run checkpoint tails need their own qualification |
+| [12](#finding-12) | Even ingress and Cell targeting do not prove even owner execution |
+| [13](#finding-13) | A streaming decoder still retains avoidable metadata |
+| [14](#finding-14) | Checksum bookkeeping depends on activation history and uses tiny file I/O |
+| [15](#finding-15) | Peer verification couples provider latency to scarce CPU admission |
+| [16](#finding-16) | Post-load recovery does not qualify acknowledged tails during load |
+| [17](#finding-17) | Compaction reads index records individually on the async task |
+| [18](#finding-18) | Cold directory-cache fills retain origin admission and delay readers |
+| [19](#finding-19) | The initial asynchronous draft still blocked its own Cell and treated every error as stale |
+| [20](#finding-20) | Sparse activation serializes unrelated Cells through a global registry lock |
+| [21](#finding-21) | The initial asynchronous draft lost demand-read cache reuse |
+| [22](#finding-22) | Reopening a persistent directory cache blocks async activation |
+| [23](#finding-23) | Shared disk headroom prevents restart and cleanup can hide recovery evidence |
+| [24](#finding-24) | Application response enrichment adds an avoidable query after commit |
+| [25](#finding-25) | A cleared checksum overlay retains historical allocation across small cuts |
+| [26](#finding-26) | Small ownership targets cannot absorb a rounded-up deadband |
+| [27](#finding-27) | Read replicas retain provider latency and refresh cache costs |
+| [28](#finding-28) | Demand read-ahead fetches a cached suffix after small updates |
+| [29](#finding-29) | Fleet recovery verification omitted the issue body |
+| [30](#finding-30) | An inactive-log recovery claim serializes unrelated Cell takeovers |
+| [31](#finding-31) | The archive check adds a serialized Cell invocation before mutations |
+| [32](#finding-32) | Catalog propagation can reject a newly created Cell before load starts |
+| [33](#finding-33) | Planning at the discovery start time suppresses fresh heartbeats |
+| [34](#finding-34) | Concurrent catalog publishers can restore revoked access |
+| [35](#finding-35) | A lagging execution node must discover a new repository before dispatch |
+
+
+
 | Document intent | Value |
 | --- | --- |
 | Content type | Design audit and acceptance gates |
@@ -15,10 +78,12 @@ verification, fencing, stable command receipts, and follower recovery model.
 The recorded sub-millisecond sparse capture and roughly 87–139 ms small-root
 RustFS preparation come from different harnesses and revisions. They identify
 where to investigate; they cannot be subtracted to explain a public action.
+
 Baseline descriptions retain the original finding; implementation paragraphs
 identify changes already made. Each measurement record names its source and
 harness separately.
 
+<a id="detail-01"></a>
 ## Current-head audit: remaining work and evidence
 
 The design retains the right authority boundary: one fenced
@@ -47,7 +112,7 @@ their separate performance gates.
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
 | Verifier corrected; current-source fleet open | Earlier fleet acknowledgement checks ignored issue bodies (29) | All sixteen later GA rate points verify complete acknowledged payloads before and after published-root owner loss. Earlier receipts remain ID/title evidence. The separate unpublished-tail fault never reached final payload verification. |
 
-The [one-vCPU GA activation-burst probe](../../cellule-ltx/perf/README.md#concurrent-ga-activation-under-one-vcpu-2026-09-27)
+The [one-vCPU GA activation-burst probe](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#concurrent-ga-activation-under-one-vcpu-2026-09-27)
 first checked four distinct Cell graphs at 32 and 256 MiB each, reading the
 payload before its first write. All 32 first-write
 object-root restores match every expected payload. Four-way activation helped
@@ -58,7 +123,7 @@ admission and explicit container limits; they do not use `CellNode`, runtime
 SQL-worker sharding or application acknowledgement. Keep the public recovery
 gate open and qualify larger roots before changing concurrency defaults.
 
-The [write-first follow-up](../../cellule-ltx/perf/README.md#write-first-ga-activation-under-one-vcpu-2026-09-27)
+The [write-first follow-up](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#write-first-ga-activation-under-one-vcpu-2026-09-27)
 removes that warming query and records origin reads during every first update.
 All 32 additional outcomes and 4,608 restored payloads pass under the same
 container limits. Whole-round preparation ranges from 109 to 697 ms at 32 MiB
@@ -93,7 +158,7 @@ observations; the original artifact cannot identify which field changed.
 combined source, resolve the retained availability failures, and qualify hot
 Cells, recovery storms and independent failure domains before assigning
 supported throughput or latency limits. The
-[twelve subsequent GA activation-history runs](../../cellule-ltx/perf/README.md#rustfs-ga-verification-2026-09-27)
+[twelve subsequent GA activation-history runs](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#rustfs-ga-verification-2026-09-27)
 verify fresh/sparse/hydrated/resumed payload recovery separately; they do not
 replace application load or fleet recovery evidence.
 
@@ -103,6 +168,7 @@ replace application load or fleet recovery evidence.
 finished with failure. Its image and stage runner use `8e61bcf3ad2`; the job
 and fault harness use `f3c4d56416f`. The imported ARM64 image digest is
 `sha256:c2b47dfab9b0e6db4cedc411a68ea8f8d106add757e13edacb1c8b8dfb38d79e`.
+
 Each node has one-vCPU/1-GiB limits; all nodes, RustFS and the load generator
 share four CPUs and 16,722,006,016 bytes of host memory. This measures shared-host
 contention, not independently provisioned node capacity.
@@ -158,6 +224,7 @@ Durations overlap; their percentiles must not be added or subtracted. The
 archive check is a separate pre-command Cell query (finding 31). LTX capture
 and SQL worker execution are small compared with end-to-end latency in this
 workload. That does not rule out cold-demand or large-database checksum costs.
+
 Of 2,121 writes, 1,235 use object proof and 886 use follower proof. Forwarded
 writes number 1,930, with p99 2,597.073 ms versus 1,851.544 ms for 191 local
 writes; this observational split does not isolate the causal forwarding cost.
@@ -174,6 +241,7 @@ completion lag p95/p99 was 1,121/1,460 ms. Follower-proof winners alone had
 publication lag p99 1,633 ms. The per-action difference between completion lag
 and queue wait has p99 1,271 ms across all writes; it includes root preparation,
 worker binding, authority CAS and confirmation, so it is not provider latency.
+
 These producer measurements have millisecond resolution; a reported zero queue
 wait means less than one millisecond. They support measuring publication work
 alongside pre-command queueing before choosing batching or provider changes.
@@ -193,6 +261,7 @@ Artifact `cell-fleet-qualification-36265830657` retains all twelve reports,
 arrival samples, action joins, node metrics and Compose logs. SHA256 of
 `load-10-04.json` is
 `b74c6ff2f84dab4d9763668235cae82ef95c5c35cafe8cdc10e8dd842f826ecd`.
+
 Rebuild joins from the retained raw samples and node logs with
 [the trace joiner](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py)
 before summarizing older artifacts; previously joined files lack publication
@@ -257,6 +326,7 @@ resource observations, logs, action joins and fault evidence. SHA256 of
 `62839410bd9f09a90b64bbd9650ba956934f0e07ef6f0b98f3bb363a2195ff5a`;
 `fault-20/report.json` is
 `cdbeacbb375fe2265efa6a51a6a5535fcd2c69563f2d5171b818b893f4601c49`.
+
 This closes the earlier image's balanced fixed-load and acknowledged-tail
 recovery gates. It does not qualify the newly integrated read-replica source,
 offered-rate saturation, prolonged update/delete churn or independent hosts.
@@ -294,6 +364,7 @@ The common [trace summarizer](https://github.com/crabbuild/crab/blob/beb439039cb
 now emits these distributions automatically in stage and fault reports, grouped
 by local/forwarded route and winning proof. Two focused cases protect matched
 subtraction and absent recorded-response observations; all 58 harness tests pass.
+
 Reprocessing the retained actions reproduced 72 independently computed phase
 percentiles. Source/summary SHA256 receipts and the summaries are retained in
 `fleet-36255479387/` beneath this checkout's external target. This is a new
@@ -306,6 +377,7 @@ ten minutes for image import, 200 for all sixteen rate points, fifteen for the
 unpublished-tail fault, and five each for evidence collection and upload, within
 a 240-minute job. Each point includes placement convergence, complete
 acknowledgement readback and owner recovery in addition to its timed arrivals.
+
 Explicit step limits leave artifact time if a phase stalls; a phase timeout
 fails qualification, and partial reports cannot establish completed capacity.
 The existing arrival durations, placement and recovery deadlines, integrity
@@ -319,7 +391,7 @@ runner previously used immediate capture for fresh databases and deferred
 capture for sparse ones, confounding the comparison. The follow-up to
 `3ced0777a6f` uses the same instrumented host, deferred capture and exact-cut
 pruning for both. Six local RustFS runs independently restored every payload
-from the final root. Their [matched measurements](../../cellule-ltx/perf/README.md#matched-capture-and-provider-restore-2026-09-26)
+from the final root. Their [matched measurements](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#matched-capture-and-provider-restore-2026-09-26)
 are small-database diagnostics, not a service latency or representation-only
 performance claim.
 
@@ -385,9 +457,11 @@ receipt regressions demonstrated rejection of a valid later cohort and
 acceptance of an inactive acknowledging log. Selection now uses the active
 post-write log; the collector also requires unchanged Cell ownership across the
 write and unchanged log epoch/members through its last pre-kill observation.
+
 Failure output retains all three log observations and the successor control.
 The second-loss path already checks its replacement member after the write;
 the fallback path deliberately verifies a nonmember after object coverage.
+
 This corrects the reproduced evidence gap. The earlier ARM log omitted the
 later cohort and successor, so attributing that failure to this gap still
 requires a live rerun. The five public receipt tests, eight private validator
@@ -435,6 +509,7 @@ dispatch time. Read and failed-attempt owner attribution remain open. The four
 new regressions cover deliberate versus unexpected loss, snapshot/kill races,
 missing statistics and retained removed-owner traces. Live qualification must
 use this harness revision before those observations close a measurement gate.
+
 The missing-statistics regression also fails against `6fc1bbc1ceb`: the previous
 observer accepted an empty Docker stats response without reporting an error.
 All 39 Python harness tests and the documentation checks pass after the change.
@@ -447,6 +522,7 @@ execution. Recovery during arrivals remains unqualified; the fault was never
 injected. That run used the `6fc1bbc1ceb` fault harness and therefore also
 predates the survivor-observation additions at `3ced0777a6f`.
 
+<a id="detail-02"></a>
 ## Priority after the implemented changes
 
 The following is the current execution order. Numbered findings below retain
@@ -479,6 +555,7 @@ meet that criterion.
 **Is this the best fix, rather than only a plausible one?** Keep the existing
 single writer, authenticated directory and ordered publisher. Range compaction
 has a reproduced amplification problem and now has selected-range proof.
+
 Choose the next change by the path it improves: cache completion for cold reads,
 checksum blocks for activation/capture, or publication work for a hot Cell.
 These costs need separate experiments; a queue-size increase addresses none
@@ -497,7 +574,7 @@ of their underlying work.
    not merely move the full activation scan into the first mutation or add
    unbounded network waits to synchronous capture.
 2. **Specify cache work ownership before removing the await.**
-   The baseline [directory reads](../../cellule-ltx/src/replica/directory.rs)
+   The baseline [directory reads](../../cellule-ltx/src/replica/directory/mod.rs)
    awaited admitted persistence before returning verified origin bytes. The
    [cache](../../cellule-ltx/src/environment/directory_cache.rs) syncs each fill
    and rewrites the membership index; recency updates also scan the entry queue.
@@ -515,7 +592,7 @@ of their underlying work.
    connection ownership, per-Cell order, deadlines and fencing. Existing
    hydration-fetch isolation tests do not prove demand-read isolation.
 4. **Measure publication in logical commits as well as roots.**
-   [Compaction](../src/publication.rs) publishes a representation change at the
+   [Compaction](../src/publication/mod.rs) publishes a representation change at the
    same commit sequence. Counting roots/s as commands/s therefore overstates
    progress; future root coalescing would change the ratio in the other
    direction. Track the authority's published commit-sequence advance, oldest
@@ -583,6 +660,7 @@ The immediate measured-work sequence is therefore:
    checksum blocks (3, 14). Cold-demand worker isolation (9), cache fills (18)
    and placement under continuous traffic (12) require their own workloads.
 
+<a id="detail-03"></a>
 ## Architecture decision after this audit
 
 Keep one SQLite writer per Cell and immutable, verified LTX roots behind the
@@ -635,6 +713,7 @@ microbenchmarks. These are proposed acceptance gates, not achieved SLOs.
 records the stable application input under the existing server request span.
 The public typed client records its runtime attempt and committed receipt
 before the issue/label/status/check output adapters return their payload.
+
 The owner carries Cell, incarnation, request ID and owner session through actor
 and worker queues, capture, winning proof and final successful reply. IDs live
 in traces, never metric labels. Effects share worker/actor tracing under their
@@ -667,6 +746,7 @@ log submission and actor scheduling. Authentication/routing/activation, query
 phases, individual provider attempts, and proof submission need further
 attribution before a complete latency decomposition. Replaying a shared-process
 test log proves the correlation fields and parser, not cross-container collection.
+
 The later three-node Compose run joined all 300 writes across container logs,
 as recorded above. Current-HEAD scale, trace-overhead comparison, query phases
 and saturation curves remain required. See the [action trace runbook](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/REFERENCE.md#attribute-acknowledged-cell-writes).
@@ -676,13 +756,16 @@ background work. The workspace pins `rusqlite` 0.34.0 / `libsqlite3-sys` 0.32.0;
 the bundled header reports SQLite 3.49.1. SQLite's
 [WAL-reset guidance](https://www.sqlite.org/wal.html)
 identifies a write/checkpoint race fixed in 3.51.3 and selected backports.
+
 The current exclusive `Db` contract and serialized worker do not establish
 that race is reachable here. Moving checkpoints onto a competing connection
 requires dependency qualification and a new capture-order proof before any
 performance claim. Offloading file cleanup is a different operation.
 
+<a id="detail-04"></a>
 ## Findings in execution order
 
+<a id="finding-01"></a>
 ### 1. Small LTX bodies pay the multipart protocol cost
 
 **Confirmed at audited revision:** [native segment upload](../../cellule-ltx/src/replica/upload.rs)
@@ -713,6 +796,7 @@ LTX transfer function. Sources up to 256 KiB are length/digest verified into
 one buffer under the existing host I/O permit, then sent with `Store::put_exact`.
 That method retains exact staging paths, create-only writes, same-content
 reconciliation after an uncertain response, and different-content refusal.
+
 Larger sources retain multipart streaming. The generic storage multipart API
 has other overwrite, staging, and cancellation callers; it is unchanged.
 Recovery manifests also retain their existing transfer path.
@@ -724,11 +808,12 @@ and conflicting existing content. These establish transfer semantics, not
 public-action latency or sustainable publication capacity.
 
 The first seven-run RustFS comparison is
-[recorded with its raw artifact location](../../cellule-ltx/perf/README.md#small-body-transfer-experiment).
+[recorded with its raw artifact location](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#small-body-transfer-experiment).
 Median run p50 moved from 6.64 to 6.16 ms, but p95 rose from 10.95 to
 12.14 ms and unchanged local phases slowed. Latency qualification remains
 open. The real HTTP/peer RustFS test passed mutations and takeover restore.
 
+<a id="finding-02"></a>
 ### 2. Persistent directory-cache hits perform durable index writes
 
 **Confirmed at audited revision:** [DirectoryCache::get](../../cellule-ltx/src/environment/directory_cache.rs)
@@ -737,7 +822,7 @@ clones and serializes the entire entry map, writes a new file, syncs it, and
 renames it. A hit changes in-memory recency, but the serialized index contains
 only keys and lengths. The hit therefore persists unchanged content. This
 path runs after a memory-cache miss in
-[read_node](../../cellule-ltx/src/replica/directory.rs); it does not affect a pure
+[read_node](../../cellule-ltx/src/replica/directory/mod.rs); it does not affect a pure
 memory hit. The runtime installs this cache during
 [Cell acquisition](../src/cell/actor/acquire.rs).
 
@@ -767,13 +852,15 @@ concurrent activation that churns the process-wide 8 MiB directory cache.
 Evaluate bounded recency bookkeeping and batched/reconstructible membership
 persistence only with restart, corruption, and disk-accounting proof.
 
+<a id="finding-03"></a>
 ### 3. Sparse writable activation still reads the complete checksum directory
 
-**Confirmed:** [prepare_writable](../../cellule-ltx/src/replica.rs) awaits
+**Confirmed:** [prepare_writable](../../cellule-ltx/src/replica/mod.rs) awaits
 [load_checksums](../../cellule-ltx/src/replica/directory/checksums.rs). That function visits
 every directory node, authenticates every page entry, writes
 eight checksum bytes per database page, and syncs the checksum file before
 opening the writer. LTX page bodies are lazy; this metadata walk is eager.
+
 At 4 KiB pages a 10 GiB database alone needs a 20 MiB checksum file, excluding
 directory transfer and validation. Tiny bootstrap Cells hide this cost.
 The directory format stores 88 bytes per page locator, plus a 32-byte header
@@ -782,6 +869,7 @@ per 256-entry leaf. For a dense 1 GiB database at 4 KiB pages, that is about
 file and internal nodes. These are format-derived sizes, not resident-memory
 requirements or a supported database-size claim. Measure directory transfer
 as well as sidecar bytes when setting recovery targets.
+
 At the audited revision, this async path directly called synchronous filesystem
 writes and syncs, including the final checksum barrier, instead of dispatching
 them through the host's blocking executor. Slow local storage could therefore
@@ -821,10 +909,12 @@ paused cleanup, and the same destination can be retried and queried. Error
 injection preserves pre-existing destinations. Exact-root, sparse publication,
 directory, and process-kill recovery tests pass. Activation percentiles and
 fleet interference remain open.
+
 The real RustFS HTTP/peer test also passes application mutations, owner
 takeover, restored collaboration state, and Git reads with this path.
 Full-image restore is a separate sibling: bulk writes/syncs already use host
 jobs, but initial file setup and scratch cleanup still need the same audit.
+
 Compaction needs that audit too: its scratch creation, final index-file opens,
 and `MergedEntries` iteration perform filesystem work from async preparation.
 The iterator is consumed by `directory::initial::build_and_upload`, so moving
@@ -845,29 +935,31 @@ exact-root/sparse tests and four activation tests pass. This change applies to
 writable activation only; selected-page lookup and exhaustive retention
 inventory retain their existing traversal and verification contracts.
 
-The [real RustFS activation probe](../../cellule-ltx/perf/README.md#sparse-activation-over-real-rustfs)
+The [real RustFS activation probe](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#sparse-activation-over-real-rustfs)
 now separates root open, checksum preparation, writable open, and first query.
 On a 256 MiB source, three cold-metadata samples per admission setting measured
 checksum preparation medians of 1,057 ms with one I/O slot, 420 ms with four,
 and 295 ms with eight. All settings fetched 259 objects and 5,797,768 bytes.
+
 Reused metadata required zero origin reads but still spent 57–119 ms in this
 phase. This supports bounded read overlap for cold metadata; it does not
 attribute the remaining local cost or qualify end-to-end tails. The probe
 also fixes an earlier timer that included compaction and a second restore in
 the reported restore duration.
 
+<a id="finding-04"></a>
 ### 4. Range compaction can do whole-graph metadata work on the publication lane
 
-**Confirmed:** [compaction::prepare](../../cellule-ltx/src/replica/compaction.rs)
+**Confirmed:** [compaction::prepare](../../cellule-ltx/src/replica/compaction/mod.rs)
 spools indexes for **all** descriptors, although it spools bodies only for the
 selected range. It then merges the final descriptor set and rebuilds the
-complete directory. [CellPublisher](../src/publication.rs) checks compaction
+complete directory. [CellPublisher](../src/publication/mod.rs) checks compaction
 after eight appends during quiet periods and forces debt handling before an
 append projected to reach 32 segments. That work retains the serialized
 publisher token; it can delay following roots even after follower responses.
 
 The admission estimate also grows with the whole database:
-[compaction_scratch_bytes](../../cellule-ltx/src/replica.rs) reserves twice the
+[compaction_scratch_bytes](../../cellule-ltx/src/replica/mod.rs) reserves twice the
 logical database size plus 64 MiB, every descriptor index, and the selected
 compressed bodies. The first term comes from
 [full_job_scratch_bytes](../../cellule-ltx/src/recovery.rs). A 1 GiB database thus
@@ -879,6 +971,7 @@ Optimizing the merge alone leaves this admission floor unchanged.
 update locators only where selected segments still supply the current page.
 Measure before making compaction concurrent with publication: any such change
 needs an exact predecessor check and must discard or safely rebase stale work.
+
 Derive scratch admission from the bounded range algorithm in the same change;
 include codec scratch, worst-case output expansion, indexes, and cancellation
 lifetime. Keep the current conservative bound until that proof exists.
@@ -925,9 +1018,10 @@ and multiple directory levels; it completes at one MiB scratch and restores
 the same database bytes, including a newer overwrite. Its observed reads were
 27,993/28,013 bytes and six uploaded objects for 4096-byte pages;
 61,738/61,762 bytes and seven objects for 512-byte pages.
+
 These are operation-work measurements, not before/after service percentiles;
 the baseline and expanded fixture differ in cache state and page coverage.
-The [executable runbook](../../cellule-ltx/README.md#verification) records the real
+The [executable runbook](../../cellule-ltx/REFERENCE.md#verification) records the real
 provider command. Retain `range-compaction-before.log`,
 `range-compaction-rustfs.log` and `range-compaction-host.log` under the external
 target. Repeated runtime debt boundaries, foreground tails and sustained
@@ -942,6 +1036,7 @@ validation pass. The unrelated staged reference-suite move still fails its
 old layout-inventory entry and remains outside this change. Current-source
 container/property CI and sustained fleet performance remain required.
 
+<a id="finding-05"></a>
 ### 5. Early follower responses do not establish sustainable write throughput
 
 **Confirmed at audited revision:** [start_publication](../src/cell/actor/requests.rs) removes one
@@ -972,9 +1067,10 @@ migrations, and transport have separate boundaries and are excluded. This
 closes response-source ambiguity; sustained drain and full phase attribution
 remain unqualified.
 
+<a id="finding-06"></a>
 ### 6. Bounded I/O does not yet prove foreground latency isolation
 
-**Confirmed:** [Host](../../cellule-ltx/src/environment/host.rs) shares I/O permits
+**Confirmed:** [Host](../../cellule-ltx/src/environment/host/mod.rs) shares I/O permits
 across page faults, uploads, and compaction. Compaction and restore also share
 recovery admission. [Paged I/O](../../cellule-ltx/src/paged_io.rs) has 32 active
 jobs, a 256-request queue, an 8 MiB cache, and a per-view gate. These provide
@@ -1002,12 +1098,14 @@ windows inside `Host::run`. Tokio's
 [current-thread and fairness contracts](https://docs.rs/tokio/1.53.1/tokio/runtime/index.html)
 require bounded task polling time. No measured decoder bottleneck is claimed.
 
+<a id="finding-07"></a>
 ### 7. Qualification needs a less favorable payload and arrival model
 
 **Confirmed at audited revision:** the [cost harness](../../cellule-ltx/perf/replica-cost/src/main.rs)
 generates `(command * 131 + index) % 251`, repeating every 251 bytes. It is
 compressible despite its source comment. Its loop calls `CellReplica::prepare`
 directly: no runtime authority CAS, follower race, or scheduled compaction.
+
 The [Compose load generator](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/load.py)
 uses one sequential write/read lane per Cell, with the Cell count equal to
 node count. Slow responses reduce offered traffic. Its retry-inclusive logical
@@ -1029,7 +1127,7 @@ and multi-host results separately labeled.
 **Instrumentation:** the cost harness now labels the periodic payload, offers
 deterministic command-seeded random bytes, and records root-preparation calls,
 outcomes, bytes, and durations through the existing storage observer. The
-[RustFS smoke evidence](../../cellule-ltx/perf/README.md#backend-calls-and-payload-entropy)
+[RustFS smoke evidence](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#backend-calls-and-payload-entropy)
 shows two HEADs and five PUTs per small prepared root; the larger random body
 uses multipart. Provider-internal retries remain opaque.
 
@@ -1040,15 +1138,17 @@ intervals. Uniform, hot, and skewed targeting retain arrival indices and stable
 write IDs in raw samples. Runtime metrics and container resources are sampled
 during load; post-load uncovered bytes must drain on every node. Failed runs
 retain reports, and acknowledged readback mismatches stop new arrivals.
+
 Controllable HTTP tests cover slow responses, lost responses, and delayed
 scheduling. Sustained offered-rate curves, update/delete churn, and full action
 phase attribution still need qualification against the current native image.
 
+<a id="finding-08"></a>
 ### 8. Sparse point faults and bulk hydration use the same read-ahead window
 
 **Confirmed:** [paged_io::fetch](../../cellule-ltx/src/paged_io.rs) asks for up to
 64 pages for every cache miss, for both `Sparse` and `Hydrating` origins.
-[CellPagedDatabase::read_run](../../cellule-ltx/src/replica.rs) selects the first
+[CellPagedDatabase::read_run](../../cellule-ltx/src/replica/mod.rs) selects the first
 same-object span in that window, fetches it, and validates every returned frame
 before the requested page is delivered. Extra pages enter the shared 8 MiB
 view-keyed cache; only pages demanded by SQLite become materialized VFS pages.
@@ -1081,6 +1181,7 @@ the first. Later faults repeat directory parsing and span allocation for
 overlapping windows; the byte cache avoids downloads of directory nodes but
 does not cache their parsed, context-validated entries. Full restore already
 consumes all spans with bounded concurrent fetches in `read_restore_window`.
+
 Evaluate stopping demand lookup at the first useful span and giving bulk
 hydration bounded multi-span progress. Keep verification scoped to the exact
 root/extents; a digest-only parsed cache cannot silently reuse validation
@@ -1088,9 +1189,10 @@ against a different root. Count parsed entries, discarded spans, fetch waves
 and consumed pages on alternating-object roots before selecting a policy.
 This is a source-supported opportunity, not a measured latency contribution.
 
+<a id="finding-09"></a>
 ### 9. One cold Cell can block unrelated Cells on its SQL worker
 
-**Confirmed:** [SqlWorkerPool](../src/cell/worker.rs) assigns a Cell to a fixed
+**Confirmed:** [SqlWorkerPool](../src/cell/worker/mod.rs) assigns a Cell to a fixed
 worker using its ID modulo worker count. The
 [worker loop](../src/cell/worker/run.rs) executes one synchronous operation at
 a time. A sparse VFS read waits in `paged_io::receive` for its provider result;
@@ -1138,6 +1240,7 @@ real sparse SQLite with delayed object-store reads during hydration and a fully
 materialized Cell on the other worker. It also fails on the previous gate and
 passes with per-worker admission. This separates admission from SQLite and
 storage progress; these controlled delays are not public-action percentiles.
+
 Seventeen focused worker, hydration, and public three-node application tests
 pass, as does runtime all-target Clippy. The real RustFS HTTP regression also
 passes through remote execution, owner loss, restored collaboration state, and
@@ -1187,6 +1290,7 @@ three Cells and two SQL workers. Two resident Cells each contain a 256 KiB
 payload; one shares the cold Cell's worker. The cold Cell contains a 4 MiB
 random BLOB. Each process reopens the same authenticated root into six fresh
 sparse destinations, alternating added GET delays `0, 20, 20, 0, 0, 20` ms.
+
 Root metadata and the provider remain warm; activation precedes the measured
 interval. The observer wakes the sibling queries on the first actual origin
 read, with no stale notification carried between trials.
@@ -1213,6 +1317,7 @@ Every cold payload query performed 16 observed origin read operations and
 transferred 4,008,092 bytes. Its returned payload digest matched the original
 source database. Repeating that full-payload query made zero new origin read
 requests and returned the same digest in 2.964–3.303 ms.
+
 Those full-payload timings include reading and hashing all 4 MiB; they are not
 point-query costs. The locked `object_store` 0.14.1 throttle adds its per-call
 delay before GET; it does not replace the RustFS provider. The linked SQLite
@@ -1273,6 +1378,7 @@ Peak cgroup memory was 91.4 / 89.9 MiB for one / two workers; both had zero
 CPU throttling and zero OOM events. Charged cgroup memory includes cache and
 is not process RSS. Three Cells and this I/O-bound workload cannot establish
 per-worker memory cost, sustained CPU capacity or a production worker default.
+
 The shared-worker stall persists even when CPU quota is not exhausted; an
 available second worker can serve its resident Cell during the provider wait.
 This supports testing bounded extra blocking capacity and idle-Cell scheduling
@@ -1284,15 +1390,17 @@ The pinned compiler image reports Rust 1.97.1. Evidence is retained in
 `worker-profile-20260927/evidence/` under the checkout's external target:
 `source.json`, the adjacent source tree, `single.json`, `paired.json`, full logs,
 binary SHA-256, container/image inspection, kernel counters and `summary.json`.
+
 The initial unshared-mount build failure is retained; it ran no tests. Each
 process creates a different random root, so this is not a byte-identical A/B
 comparison. Public actions, first activation, durable confirmations, sustained
 load and independent failure domains remain unqualified by this diagnostic.
 
+<a id="finding-10"></a>
 ### 10. Published-cut cleanup occupies the SQL worker after durability
 
-**Confirmed at audited revision:** [CellExecutor::confirm_published](../src/cell/executor.rs) calls
-[Db::prune_captured](../../cellule-ltx/src/db.rs) on the SQL worker. Its
+**Confirmed at audited revision:** [CellExecutor::confirm_published](../src/cell/executor/mod.rs) calls
+[Db::prune_captured](../../cellule-ltx/src/db/mod.rs) on the SQL worker. Its
 `prune_retained` implementation reads the entire selected file into a `Vec`,
 hashes and decodes it through
 [verify_segment](../../cellule-ltx/src/recovery.rs), then deletes it and reconciles
@@ -1304,8 +1412,9 @@ On the object-only actor path, the publication proof channel is completed
 after this cleanup. With node-log durability, an external proof can arrive
 earlier, but the final `confirm_durable` still waits for its SQL worker. Thus
 cleanup can delay a response or later work after external durability exists.
+
 This is separate from the capture-time reinspection already removed and
-[measured](../../cellule-ltx/perf/README.md#large-sparse-checkpoint-capture-2026-09-25).
+[measured](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#large-sparse-checkpoint-capture-2026-09-25).
 The same cleanup implementation exists on the main snapshot.
 
 **Change to evaluate:** first replace full-buffer verification with admitted,
@@ -1336,13 +1445,14 @@ transition moved. A read or unlink failure still retains unfinished accounting.
 The new public-`Db` regression fails on the old whole-file transfer and passes
 with streaming; truncation, extension, corruption, and substitution with another
 valid cut preserve files and reservations until a successful retry. A local
-[RustFS comparison](../../cellule-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
+[RustFS comparison](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#streaming-published-cut-cleanup-2026-09-26)
 observed 194.7 to 153.7 ms median cleanup for the largest 50.8 MB batch across
 three processes, with an unchanged pooled 0.161 ms small-cut median. This is
 microbenchmark evidence. Cleanup still blocks the SQL worker and the decoder
 still allocates indexes; finding 13 prevents interpreting this as constant
 memory or completed foreground-latency qualification.
 
+<a id="finding-11"></a>
 ### 11. Long-run checkpoint tails need their own qualification
 
 **Confirmed:** [checkpoint_if_needed](../../cellule-ltx/src/capture/checkpoint.rs)
@@ -1380,7 +1490,7 @@ overlap those operations must qualify a fixed SQLite build first, then prove
 the capture barrier and restart handling. Record the linked SQLite version in
 the evidence; a Rust crate version alone does not identify it.
 
-The [fixed-working-set runner](../../cellule-ltx/perf/README.md#fixed-working-set-updatedelete-churn-2026-09-26)
+The [fixed-working-set runner](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#fixed-working-set-updatedelete-churn-2026-09-26)
 now supplies executable update/delete/reinsert and exact provider-restore
 proof. Six local RustFS release runs completed 300 mutations over 32 rows with
 32 KiB payloads, each crossing two checkpoints and restoring the expected
@@ -1391,6 +1501,7 @@ append-only fixture gap for local LTX diagnostics. Pinned readers, scheduled
 compaction, concurrent Cells and sustained public-action tails remain open;
 these short unconstrained runs do not qualify that broader gate.
 
+<a id="finding-12"></a>
 ### 12. Even ingress and Cell targeting do not prove even owner execution
 
 **Confirmed at audited revision:** [run_stage](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py)
@@ -1420,6 +1531,7 @@ load-balance behavior; test several Cells per node and a hot Cell separately.
 distribution, owner distribution, and actual execution distribution. Also record
 the Docker VM's physical CPU/memory and host contention: twenty 1-vCPU limits
 on an 8-vCPU VM are an oversubscribed topology, not twenty independent CPUs.
+
 Require current-source images, repeated sustained runs, and isolated multi-host
 failure domains before choosing supported limits. Run Entity, Shard, Workflow,
 and read-model actions through public application handles as well as this issue
@@ -1439,6 +1551,7 @@ not alter the attributed source. Local and CI source builds set the same
 revision label as release builds. The runner rejects a missing or mismatched
 label before startup, pins every server service and release bootstrap to the
 inspected image ID, retains a tag for that image, and checks each running node.
+
 Schema 3 load reports separate server source/platform/image from harness source.
 Labels remain producer metadata; imported images still need their CI source
 and checksum receipts.
@@ -1461,8 +1574,9 @@ placement settling and cross-container measurements remain open.
 **Loaded scale-out gap at `e50055c48bb`:** the server
 [rebalance adapter](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs) checks every
 15 seconds and normally excludes a Cell used within the last 60 seconds.
+
 The [actor](../src/cell/actor/lifecycle/scheduling.rs) refreshes last-used time
-for both queries and commands. The [planner](../src/fleet/placement.rs) also
+for both queries and commands. The [planner](../src/fleet/placement/mod.rs) also
 requires two stable observations and 60 seconds from the adapter's first
 eligible observation, with at most two transfers per planning batch. Draining
 has a separate eligibility path. These rules also exist on the compared main
@@ -1511,6 +1625,7 @@ The stages killed node-01, node-02, node-05, and node-03 in that order. The
 next stage's owner maps show consolidation after those recoveries. No rebalance
 completion was recorded in the retained final logs. Continued public checks
 and load keep Cells active, and the runner has no idle-convergence phase.
+
 This explains why this experiment cannot establish balanced scale-out; it does
 not isolate the causes of the higher p99 from shared-host contention, observer
 overhead, peer forwarding or provider work. All but one write used object proof;
@@ -1562,6 +1677,7 @@ pre-mutation archive policy now report separate durations. Repository routing
 reports its static action, result and elapsed time; client preparation binds
 its duration to the exact Cell, incarnation and mutation request. Issue creation
 reports its conditional label/assignee enrichment and response-value construction.
+
 The collector requires these events for each acknowledgement and retains nested
 routes separately: lifecycle routing belongs inside the archive-check interval,
 not the command route. These changes observe the existing execution order and
@@ -1603,6 +1719,7 @@ share, and agreement with advertised active counts. Session, incarnation and
 ownership epoch must stay stable for 30 seconds while every advertisement
 generation advances. The gate retains incomplete views and retries for up to
 ten minutes; failure stops before the workload or fault and retains samples.
+
 It does not bypass the production idle, settlement or authority gates. Tests
 reject concentrated owners, stale signed counts, stale generations and changing
 epochs; transient transfer resets the window. A fault-preflight failure now
@@ -1615,6 +1732,7 @@ Runtime documentation validation passes 28 schema/protocol assertions and 194
 local links. The gate's ten-minute retry window is a qualification timeout,
 not a supported placement SLO.
 
+<a id="finding-13"></a>
 ### 13. A streaming decoder still retains avoidable metadata
 
 **Confirmed at audited revision:** [codec::Decoder](../../cellule-ltx/src/codec.rs) accumulates the
@@ -1639,6 +1757,7 @@ index scratch separately, including cleanup and cancellation ownership.
 as compressible and high-entropy cuts, multiple page sizes, and concurrent
 verifications under the 1 GiB node profile. Include long invalid tails, early
 end markers, truncated varints, and valid CRCs around invalid index entries.
+
 Run the independent Celld/Superfly vectors, bundle and node-frame verification,
 exact restore, and sparse publication. A bounded individual `read` does not
 prove bounded accumulated decoder memory.
@@ -1661,16 +1780,17 @@ memory: the observed index still grows with page count, explicit replica
 inspection needs additional metadata, and the caller may retain input bytes.
 Concurrent peak RSS and same-worker response latency remain open gates.
 
-The [exploratory RustFS comparison](../../cellule-ltx/perf/README.md#streaming-footer-and-optional-replica-index-2026-09-26)
+The [exploratory RustFS comparison](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#streaming-footer-and-optional-replica-index-2026-09-26)
 observed a 140.5 to 101.9 ms median cleanup for the largest batch across three
 processes per implementation. Baseline compilation and unrelated host activity
 limit attribution; overlapping whole-process RSS ranges do not prove a memory
 improvement. This evidence does not qualify public-action latency or capacity.
 
+<a id="finding-14"></a>
 ### 14. Checksum bookkeeping depends on activation history and uses tiny file I/O
 
 **Confirmed:** fresh `Db::open` and `CellReplica::open_new` start with
-`PageChecksums::default()` in [capture initialization](../../cellule-ltx/src/capture.rs).
+`PageChecksums::default()` in [capture initialization](../../cellule-ltx/src/capture/mod.rs).
 Sparse activation and clean resume seed a file-backed base instead.
 [PageChecksums::persist](../../cellule-ltx/src/pages.rs) is called after each sealed
 cut in [WAL capture](../../cellule-ltx/src/capture/wal.rs), before capture returns.
@@ -1703,6 +1823,7 @@ recovery authority. The minimal-feature library still needs a tested local path.
 resume, and repeated eviction at multiple page sizes. Use `capture_deferred`
 in both runtime comparisons: the current replica-cost harness changes capture
 durability along with `--sparse`, so its two modes do not isolate this finding.
+
 Record checksum host
 reads/writes and bytes separately from SQLite WAL I/O, capture allocation peak,
 handoff time, and sibling-Cell p99. Preserve the file-backed overlay tests,
@@ -1735,6 +1856,7 @@ the old base before merging. Fixed-size updates mutate the uniquely owned
 `Vec` instead of allocating and copying the whole array. Retained immutable
 memory snapshots still use Rust's
 [`Arc::make_mut` copy-on-write contract](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.make_mut).
+
 Growth may reallocate. Truncation releases capacity when it exceeds twice the
 live entry count; memory residency still scales with database size. The old
 owner remains unchanged on errors before sealing, and errors while merging a
@@ -1770,6 +1892,7 @@ Public-action percentiles, allocation peak, fragmented-update tradeoffs and
 eviction interference still need qualification. Eager authenticated activation
 metadata and work on the shared SQL worker remain separate open gates.
 
+<a id="finding-15"></a>
 ### 15. Peer verification couples provider latency to scarce CPU admission
 
 **Confirmed at `3cd0bd1bfe6`:** the HTTP
@@ -1794,6 +1917,7 @@ Queued codec admission uses the same resource limit as immediate admission.
 It explicitly checks the absolute deadline before waiting and after waking:
 the pinned Tokio 1.53.1 `Timeout::poll` polls a ready inner future first, so
 `timeout_at` alone admitted an already-expired request in the regression.
+
 Nine worker tests now pass, including expired/free-capacity admission, expiration
 when a slot opens, cancellation, timeout, shutdown, and resource accounting.
 The node-directory test separately rejects an expired enrollment even when its
@@ -1814,6 +1938,7 @@ job can run during that delay, and checks a 10 ms received budget returns 504.
 The public HTTP regression also delays only owner resolution by two seconds
 with a 500 ms received budget: it returns 504 without invoking the query
 handler, then the same signed query succeeds when the delay is removed.
+
 The full public application regression passes against memory storage and real
 RustFS: concurrent hint expiry, owner takeover, restored collaboration state,
 and Git clone/tag reads. These are functional proofs, not measured p95 gains.
@@ -1838,6 +1963,7 @@ Measure admission wait, enrollment I/O, codec time, retries, 503s, and retained
 request bytes under the one-vCPU profile. Compare public p95/p99 at the same
 offered load before accepting the hint and queue changes as a performance win.
 
+<a id="finding-16"></a>
 ### 16. Post-load recovery does not qualify acknowledged tails during load
 
 **Confirmed at `c12b41ef638`:** the scheduled
@@ -1879,6 +2005,7 @@ the typed commit receipt. Its submission UUID is a durable application key;
 The runtime response trace includes Cell, sequence, and proof source, while
 `cells status` exposes the published root position. Aggregate response and
 uncovered-byte counters cannot join those positions to one HTTP submission.
+
 Before using them to trigger a fault, retain a structured submission/receipt
 correlation at the application boundary and match it to the owner proof trace.
 The trace alone is not an HTTP acknowledgement: the load generator must also
@@ -1889,16 +2016,18 @@ or resolve all of them through public handles after takeover. Count duplicate
 effects, unrecoverable results, interrupted arrivals, and recovery delay.
 Measure healthy Cells' p99 throughout the fault. The run must show that
 publication catches up after origin recovers without discarding accepted work.
+
 Repeat for uniform and hot/skewed workloads at 3, 5, 10, and 20 nodes, including
 compatible rollout. Record executing owners during load; a pre-load owner map
 cannot identify execution after migration.
 
+<a id="finding-17"></a>
 ### 17. Compaction reads index records individually on the async task
 
 **Confirmed at `9ec6da5176e`:**
 [SpoolCursor::advance](../../cellule-ltx/src/replica/compaction/source.rs)
 calls `FileIo::read_exact_at` for each 60-byte index entry. The default
-[filesystem implementation](../../cellule-ltx/src/environment/host.rs) performs
+[filesystem implementation](../../cellule-ltx/src/environment/host/mod.rs) performs
 a seek, allocation, and read for each call. Remote index downloads already use
 bounded chunks; their subsequent local merge does not retain a read buffer.
 
@@ -1915,6 +2044,7 @@ one live page. Buffering only the output writer does not address these reads.
 `cell_compaction_coalesces_local_output_writes` used the existing 3,000,000-byte
 `randomblob` SQLite fixture on a current-thread Tokio runtime. Local RustFS at
 port 19010 backed immutable preparation, full compaction, and two restores.
+
 It recorded **1,474 60-byte reads, all on the async thread**, out of 1,480
 local reads during compaction. The original and compacted roots restored
 byte-identical databases. An in-memory-provider control recorded the same
@@ -1985,14 +2115,16 @@ partial and full compaction. Replica all-target Clippy passes with warnings
 denied. Whole-graph metadata work, the conservative scratch admission floor,
 and sustained foreground/publication measurements remain open.
 
+<a id="finding-18"></a>
 ### 18. Cold directory-cache fills retain origin admission and delay readers
 
 **Confirmed at `7d3dd9232b0`:**
-[read_node](../../cellule-ltx/src/replica/directory.rs) takes `Host::io_permit`,
+[read_node](../../cellule-ltx/src/replica/directory/mod.rs) takes `Host::io_permit`,
 downloads and authenticates a directory object, then awaits
 `directory_cache_put` before inserting the bytes into memory and returning.
 The permit remains in scope during that await.
-[Host::directory_cache_put](../../cellule-ltx/src/environment/host.rs) dispatches
+
+[Host::directory_cache_put](../../cellule-ltx/src/environment/host/mod.rs) dispatches
 blocking cache work under a separate job permit.
 [DirectoryCache::put](../../cellule-ltx/src/environment/directory_cache.rs)
 syncs the new file and renames it, then clones, serializes, syncs and renames
@@ -2029,6 +2161,7 @@ the current cache contract. Then evaluate returning authenticated bytes before
 optional cache installation through a bounded, deduplicated fill queue owned
 by the host. Account queued bytes, dispatched jobs and disk reservations;
 shutdown must drain or cancel undispatched work and await dispatched work.
+
 Do not replace the await with unlimited detached tasks. Tokio's
 [blocking-task contract](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html)
 requires dispatched work to retain its resources until completion.
@@ -2036,6 +2169,7 @@ requires dispatched work to retain its resources until completion.
 **Gate:** preserve digest, symlink, restart, eviction and disk-budget proof.
 Pause/fail cache writes and index syncs while a second Cell reads or publishes;
 the second origin request must progress after the first transfer completes.
+
 Exercise canceled readers and concurrent fills for one key. Measure first
 read/first mutation, cache fill queue age, blocking-job wait and foreground
 p99 with empty and churned caches under the 1-vCPU/1-GiB profile. Network
@@ -2053,10 +2187,11 @@ may increase origin reads after a restart; cache contents remain derived data.
 Both new regressions failed before the change. With a cache fsync paused, a
 separate cold origin read now completes using the same one-permit I/O pool;
 aborting the first reader retains its blocking slot until the fsync finishes.
+
 The second root restores into a fresh SQLite file with the captured row
 visible. The same test passes against real RustFS and is retained as an
 explicitly invoked host test, documented in the
-[LTX verification runbook](../../cellule-ltx/README.md#verification). A private
+[LTX verification runbook](../../cellule-ltx/REFERENCE.md#verification). A private
 admission regression proves that busy job slots do not queue fill buffers and
 that a subsequent admitted fill persists normally.
 
@@ -2064,6 +2199,7 @@ that a subsequent admitted fill persists normally.
 return after immediate job admission and dispatch. A host-family tracker
 deduplicates in-flight keys; no extra task queue or thread pool was added.
 The existing job ceiling and directory-node size cap bound retained buffers.
+
 Each dispatched closure retains blocking-job and disk accounting through its
 completion or drop. Derived fills do not retain the reader's recovery/dirty
 cohort. Busy disk-cache lookups and per-key fill locks yield a cache miss,
@@ -2075,6 +2211,7 @@ Cache construction excludes accepted fills before cleaning private temporaries.
 `Host::drain_cache_fills` waits for accepted cache work; runtime shutdown calls
 it after stopping admission and draining Cells, workers and durability work.
 Canceling a drain does not release running jobs; callers can await it again.
+
 This follows the executor's accepted-job ownership contract and Tokio's
 [blocking-task lifetime](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html).
 There is no separate permanent cache shutdown state, so an explicitly drained
@@ -2084,6 +2221,7 @@ The strengthened public fault test first failed because root open waited for
 cache fsync. It now returns while the sync remains paused, as do fresh-store
 lookups for the same and another Cell sharing that cache. The one/two-job-slot
 matrix passes over memory storage and real RustFS, with exact SQLite restore.
+
 Draining and reopening remain pending until the pause is released. Private
 tests cover bounded dispatch, duplicate fills, dropped/rejected jobs, and
 filesystem failures/panics followed by a successful fill. Existing restart,
@@ -2099,6 +2237,7 @@ in-memory recency, sharing the existing cache-hit persistence rule.
 Verification passed: 16 host-environment unit tests, eight authenticated
 directory/restart tests, the real RustFS paused-fill matrix, and the public
 HTTP/mTLS RustFS collaboration test with owner takeover and Git readback.
+
 The cache-open lifecycle suite and runtime activation/shutdown regressions also
 pass. Replica/runtime and minimal-feature LTX all-target Clippy run with
 warnings denied. These are correctness and concurrency checks; no controlled
@@ -2109,10 +2248,11 @@ membership changes still rewrite its index. Skipping cache access can increase
 origin traffic. Public first-read/first-mutation percentiles, cache-hit effects
 and sibling-Cell interference under sustained load remain open gates.
 
+<a id="finding-19"></a>
 ### 19. The initial asynchronous draft still blocked its own Cell and treated every error as stale
 
 **Confirmed in committed coordination and the hydration draft:**
-[`BeginHydration`](../src/coordination.rs) sets `busy = true`, and `Schedule`
+[`BeginHydration`](../src/coordination/mod.rs) sets `busy = true`, and `Schedule`
 will not start queued work until `FinishHydration` clears it. The
 [background task](../src/cell/actor/lifecycle/background.rs) holds this state
 across preparation, asynchronous fetch and installation. Releasing the SQL
@@ -2133,6 +2273,7 @@ has not yet taken advantage of that distinction.
 foreground work in the pure coordination state. Keep the effect alive for
 drain, shutdown and ownership checks; reserve the worker only for preparation
 and installation. Prefer foreground work between bounded installation batches.
+
 Classify a retryable pre-install fetch failure as deferred maintenance only
 while the owner remains valid and no local installation occurred. Retain
 fencing for lease loss, integrity failure, uncertain partial installation and
@@ -2143,6 +2284,7 @@ a sufficient fix.
 **Gate:** use a public Cell handle to read a resident row and perform a mutation
 while a different inherited range is stalled. Prove queue progress, the exact
 captured successor root, and no stale overwrite after checkpoint/truncate.
+
 Repeat for owner loss, drain, canceled fetch, transient transport failure,
 corruption and installation failure. Existing
 [`residency` tests](../tests/runtime/lifecycle/residency.rs) cover shutdown,
@@ -2164,22 +2306,26 @@ It now queries and mutates a resident row while a different hydration GET is
 paused, then restores the exact published root and reads the mutation. A
 second public test exposes one transient provider failure with storage retries
 disabled, proves the owner remains serving, and waits for hydration to resume.
+
 Seven lifecycle tests retain shutdown, permanent-origin failure, disk exhaustion,
 lease-loss and takeover coverage. Forty-six coordination/simulator cases pass,
 including hydration completion while a command owns the foreground slot.
+
 Four worker tests also cover fetch cancellation, deadline deferral, retained-byte
 pressure and progress on both workers. The public HTTP/mTLS RustFS collaboration
 test passes with the split enabled: a forwarded application mutation is
 acknowledged, publishes LTX and remains visible through the application query.
 This is end-to-end correctness evidence, not a service performance qualification.
 
+<a id="finding-20"></a>
 ### 20. Sparse activation serializes unrelated Cells through a global registry lock
 
-**Confirmed at `3611a7895f6`:** [`Registration::new`](../../cellule-ltx/src/writable_vfs.rs) locks
+**Confirmed at `3611a7895f6`:** [`Registration::new`](../../cellule-ltx/src/writable_vfs/mod.rs) locks
 the process-wide `views()` map before creating and sizing the sparse file,
 syncing it and its parent, constructing the paged I/O bridge, reserving local
 disk, and allocating the presence map. It releases the lock only after
 inserting the activation. `x_open` and registration teardown use the same map.
+
 Consequently a slow local sync can delay another sparse activation or its
 teardown on a different SQL worker. Already open SQLite reads do not acquire
 this registry lock; the risk concerns activation and lifecycle concurrency.
@@ -2226,9 +2372,10 @@ The first public-API regression reproduced both unrelated open and close
 missing their one-second bound while a file sync was paused. The strengthened
 test pauses file sync, parent sync and bridge startup separately, and checks
 distinct selected-root values for all three Cells. See the
-[RustFS run command](../../cellule-ltx/README.md#verification) for the same scenario
+[RustFS run command](../../cellule-ltx/REFERENCE.md#verification) for the same scenario
 with real objects. Failure cases cover file creation, sizing, both barriers,
 bridge startup, capture-directory creation and a pre-existing destination.
+
 Repeated conflicting opens must refuse promptly without releasing the first
 caller's claim. Per-activation disk/bridge waits still occupy its assigned SQL
 worker; this fix does not qualify aggregate cold-start latency or disk capacity.
@@ -2242,6 +2389,7 @@ hydration and restored application visibility; they do not establish a fleet
 latency percentile. Before/after and RustFS logs use the `activation-registry-`
 prefix in this checkout's external target directory.
 
+<a id="finding-21"></a>
 ### 21. The initial asynchronous draft lost demand-read cache reuse
 
 **Confirmed in the draft, absent as a separate path on main:**
@@ -2249,6 +2397,7 @@ prefix in this checkout's external target directory.
 cache and fetches ahead on a miss. `Io::hydration_pages` instead calls the
 database's `read_run` directly, without consulting or filling that cache.
 The VFS presence map records installed pages, not all prefetched pages.
+
 Hydration can consequently download and decode pages already fetched by an
 earlier SQL fault. The two-versus-three operation diagnostic in finding 9 is
 consistent with this path difference; it does not isolate bytes, cache hits,
@@ -2272,6 +2421,7 @@ reservation covers page payload, not every transient allocation.
 range through SQL, then hydrate it under cold, warm and churned caches.
 Measure useful prefetched pages, duplicate range bytes, fetch waves, decode
 CPU, peak retained/RSS bytes, hydration completion and sibling/own-Cell p99.
+
 Repeat with alternating-object page locators, cancellation and a full retained
 budget. Preserve no cursor advancement on an abandoned batch and exact-root
 verification; never treat cache content as recovery authority.
@@ -2286,14 +2436,16 @@ checkpoint supersession, truncate/regrow, foreign activation and exact restore.
 Concurrent demand/fetch single-flight, fragmented multi-span fetching and total
 memory accounting remain separate qualification work.
 
+<a id="finding-22"></a>
 ### 22. Reopening a persistent directory cache blocks async activation
 
 **Confirmed at `e50055c48bb`:** the async runtime acquisition paths call
 [`replica_with_directory_cache`](../src/cell/actor/acquire.rs), which calls
-[`Host::with_directory_cache`](../../cellule-ltx/src/environment/host.rs)
+[`Host::with_directory_cache`](../../cellule-ltx/src/environment/host/mod.rs)
 synchronously. [`DirectoryCache::with_budget`](../../cellule-ltx/src/environment/directory_cache.rs)
 cleans temporaries, reads/parses the complete index, checks each file's length
 and canonical path, and acquires its disk reservation before returning.
+
 This constructor bypasses the admitted executor used by subsequent cache
 reads and fills. Slow cache storage can occupy a Tokio worker even though
 checksum-file creation and sparse registry setup have been isolated elsewhere.
@@ -2340,6 +2492,7 @@ TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
 reconstruction, and have runtime acquisition await one admitted blocking cache
 construction job. Bound index input before allocation and avoid
 validating an arbitrary number of entries beyond the accepted cache envelope.
+
 Preserve canonical-path checks, private-temporary cleanup, reservation ownership
 and origin verification. Cancellation must retain the dispatched job and its
 reservations until it finishes. A cache remains an optional accelerator.
@@ -2377,6 +2530,7 @@ also shares a deliberately constrained disk budget without overcommitting it.
 With only the running-total change applied, the optimized diagnostic's
 16,384-entry median fell from 757.404 ms to 528.169 ms. Filesystem validation
 remains material; moving it off the async caller is a separate improvement.
+
 This is one before/after diagnostic series, not a service percentile or a
 supported recovery limit. Raw output is
 `cache-construction-running-total-release.log` beneath the external target;
@@ -2393,6 +2547,7 @@ primitive takeover test pass, including the acknowledgement trace join in the
 HTTP case. Replica/runtime all-target Clippy, formatting and documentation
 validation pass. These checks do not qualify fleet recovery percentiles.
 
+<a id="finding-23"></a>
 ### 23. Shared disk headroom prevents restart and cleanup can hide recovery evidence
 
 **Reproduced:** the three-node `e50055c48bb` run completed its offered load but
@@ -2443,6 +2598,7 @@ Compose fixtures; they do not rerun the real disk-threshold fault or establish
 successful recovery in the earlier missing receipt. Disk provisioning and a
 fresh full fleet run remain required.
 
+<a id="finding-24"></a>
 ### 24. Application response enrichment adds an avoidable query after commit
 
 **Confirmed:** [issue creation](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/issues.rs) always
@@ -2462,12 +2618,13 @@ action's measured latency.
 The new trace measures 7.482 ms median and 14.065 ms p95 outside the typed
 invocation for forwarded writes. That difference includes other work: the
 invocation timer starts in `PreparedCommand::execute`, after description and
-encoding in [command preparation](../src/client.rs), and HTTP response readiness
+encoding in [command preparation](../src/client/mod.rs), and HTTP response readiness
 follows enrichment. The trace does **not** assign all of this time to labels.
 
 **Change to evaluate:** fetch the catalog only when selection validation or
 response rendering needs it, matching the pull-view rule. Create/detail can
 inspect returned IDs; list can inspect the returned page before fetching labels.
+
 Edit also uses the catalog to validate incoming IDs before the command: retain
 that read for nonempty input, including invalid selections, and retain permission
 checks even when clearing labels. An edit without label changes may still return
@@ -2480,6 +2637,7 @@ cached-description changes. Keep action authorization and receipt validation.
 nor label rendering must issue zero label queries. Nonempty incoming selections
 still reject unknown/duplicate IDs; selected labels retain their names/colors
 and permissions, including forbidden attempts to clear them.
+
 Retry an ambiguous create after subsequently labeling the issue and require
 the existing issue plus current label rendering. Compare local and forwarded
 HTTP actions over RustFS with the same workload and count peer operations.
@@ -2498,6 +2656,7 @@ in-memory storage and real RustFS. It counts owner-side executed queries:
 unlabeled create/edit performs one required repository-archive query, with no
 label query; unlabeled list/detail performs only its requested query. A labeled
 mutation or create replay performs the archive query plus one catalog query.
+
 Replaying a committed create after assigning labels returns the existing issue
 with its current labels. This proves replay behavior, not an injected dropped
 HTTP response. The same test covers owner loss, restored collaboration state,
@@ -2521,6 +2680,7 @@ conditional enrichment rules remain. Re-run their public query-count proof on
 the combined source rather than interpreting this historical record as a new
 replica latency result.
 
+<a id="finding-25"></a>
 ### 25. A cleared checksum overlay retains historical allocation across small cuts
 
 **Confirmed at `e47d1fc2c48`:** `PageChecksums` derives `Clone` and stores
@@ -2554,7 +2714,7 @@ post-seal merge boundary so the next candidate's allocation follows its actual
 changed pages. Compare allocator churn before choosing any retained-capacity
 policy. Do not globally change `Clone` to discard entries:
 [local recovery](../../cellule-ltx/src/recovery.rs) accumulates live checksum
-overlays, and [Db::resume](../../cellule-ltx/src/db.rs) clones that materialized
+overlays, and [Db::resume](../../cellule-ltx/src/db/mod.rs) clones that materialized
 state. Clearing those entries would change recovery semantics. File merge
 failure must still fence the session; pre-seal failure must leave the original
 checksum state intact.
@@ -2562,6 +2722,7 @@ checksum state intact.
 **Gate:** repeated large → tiny → truncate/regrow workloads on memory and
 file bases at 512/4096-byte page sizes. Record allocated bytes, allocation
 count, retained capacity, capture duration and per-node RSS with many Cells.
+
 Keep `memory_candidates_preserve_snapshots_through_truncation_and_regrowth`,
 `file_backed_overlay_matches_full_scan_across_update_truncate_and_regrowth`,
 `cell_checksum_write_failure_fences_after_sealing_the_cut`, independent CRC
@@ -2571,7 +2732,7 @@ these integrity tests or the public RustFS action comparison.
 The audit also tested the private page-cache mechanism: 32 interleaved hits
 did not retain one 4 KiB page after 32 other 64-page batches filled the 8 MiB
 FIFO. This alone does **not** justify switching to LRU. The
-[writable VFS](../../cellule-ltx/src/writable_vfs.rs) installs demanded pages
+[writable VFS](../../cellule-ltx/src/writable_vfs/mod.rs) installs demanded pages
 locally and subsequent reads bypass the bridge cache. Investigate unused
 prefetch eviction, retained copies of installed pages and concurrent duplicate
 fetches; first prove those costs through real sparse reads and hydration.
@@ -2584,6 +2745,7 @@ are retained as `ltx-design-audit/current-head-mechanisms.patch` and
 `ltx-design-audit/current-head-mechanisms.log` under this checkout's external
 Cargo target directory. No runtime behavior, dependency, public contract,
 qualification threshold or test inventory changed for this audit.
+
 After removing the probes, all four existing checksum module tests passed.
 The documentation check passed 28 schema/protocol assertions and 190 local
 links; `git diff --check` passed. The pre-existing staged changes were preserved.
@@ -2604,14 +2766,16 @@ large resumed capture, dense handoff and post-seal write failure. Independent
 full-database CRC and process-exit continuation pass. Replica and minimal-feature
 all-target Clippy pass with warnings denied. The real RustFS HTTP/mTLS test
 also passes through owner takeover, collaboration readback and Git reads.
+
 These results establish the
 allocation-lifetime change and integrity; fleet action latency and aggregate
 RSS remain unqualified.
 
+<a id="finding-26"></a>
 ### 26. Small ownership targets cannot absorb a rounded-up deadband
 
 **Confirmed after the fleet run:** the
-[planner](../src/fleet/placement.rs) computed receiver room as
+[planner](../src/fleet/placement/mod.rs) computed receiver room as
 `target - ceil(target * 2 / 100) - active_cells`. With twenty Cells and twenty
 equal nodes, the target is one and even an empty receiver has zero room. With
 targets two through forty-nine, the margin reserves more than two percent of
@@ -2643,6 +2807,7 @@ inactivity and fencing. The production caller is the HTTP router's periodic
 rebalance loop; its callee still releases through the actor and activates the
 receiver through ordinary authority acquisition. All seven public planner cases,
 fifteen private planner cases, and both server transfer/readback tests pass.
+
 Runtime and HTTP all-target Clippy pass with warnings denied. Exact-source
 Compose proof must still verify the real fleet effect. The status-only
 preflight in finding 12 retains failures instead of calling unbalanced ingress
@@ -2679,6 +2844,7 @@ that inventory change. Hydration's new public types live under `cellule_ltx::db`
 beside their owning `Db` API; the frozen root prelude is unchanged. No inventory
 was edited to suppress a failure. Full-plan completion remains unproven.
 
+<a id="finding-27"></a>
 ### 27. Read replicas retain provider latency and refresh cache costs
 
 The read-replica extension landed on main at `396e0ab1b40`. It is an explicit
@@ -2692,6 +2858,7 @@ and p99 37.73–44.97 ms for a fixed 75% node-1 / 25% node-5 ingress mix.
 Local-primary medians remained 1.86–1.91 ms. The [source-bound receipt](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md#reader-discovery-optimization-under-fixed-ingress-traffic)
 records the controlled membership-discovery improvement; the raw final report
 hash was rechecked as `d5dc8e5ed6c1f77ca075457665a9ea54cfa86a40e0e2009e76657534dc0ec131`.
+
 This is positive evidence for reducing metadata work. It does not qualify the
 combined branch, a 20-node optimized workload, controlled write/refresh churn, or
 independent hosts.
@@ -2699,6 +2866,7 @@ independent hosts.
 **Evidence map.** HTTP issue detail selects the replica policy in
 [`issues.rs`](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/issues.rs). It calls the repository
 router, then [`ReplicaReadRouter::query`](../src/client/routing.rs).
+
 `selected` reads control and desired-reader policy concurrently on every
 selection. `NodeDirectory::select_readers` shares a signed membership scan for
 at most one second. The selected [`CellReadReplica`](../src/client/replica.rs)
@@ -2713,6 +2881,7 @@ changes, owner death and authority outages. Record routing, peer authentication,
 SQL, final control, final liveness and provider attempts separately. Concurrent
 coalescing may remove duplicate routing reads. A post-SQL authority check
 must not reuse an observation whose read started before that query completed.
+
 An arbitrary TTL on the final check changes the response guarantee and needs
 an explicit lease/invalidation contract. Keep unavailable authority fail-closed
 until such a design is proven.
@@ -2726,6 +2895,7 @@ identifier; the shared demand cache keys pages by `(view, page)`. Unchanged
 pages in an old snapshot therefore cannot directly hit that cache in the new
 snapshot. Authenticated directory metadata has its own cache, so this is a
 page-body reuse gap, not a claim that all metadata is downloaded again.
+
 Measure a fixed hot read set while small updates advance the root. Record cold
 bytes after each refresh, cache occupancy, retained old views and read p99.
 Consider a bounded cache keyed by verified immutable object/frame identity,
@@ -2740,6 +2910,7 @@ query despite an unused second SQL slot. Immutable connections now borrow any
 available SQL slot, while writer jobs retain their own shard. Both paths share
 the node charge and hold their permit through completion, including caller
 cancellation. Shutdown closes admission before waiting for those charges.
+
 The public lifecycle regression requires refresh to finish while an old-view
 query is held, then verifies view lifetime, cancellation and drain. It now
 releases its injected pause before asserting, so a regression fails without
@@ -2772,6 +2943,7 @@ restored application state and Git readback, and its received write joins to
 the actual text logs. This shared-process debug fixture supplies functional
 and trace-correlation evidence, not a throughput or tail-latency result.
 
+<a id="finding-28"></a>
 ### 28. Demand read-ahead fetches a cached suffix after small updates
 
 **Confirmed at `5bbc7021c46`, using local RustFS.** A new diagnostic published
@@ -2796,16 +2968,18 @@ also fetched an already cached suffix. A second run instrumented the actual
 fetch: page 15 fetched pages 15–78; the subsequent miss at page 6 fetched
 pages 6–69, including **55 pages already cached**. The successor transferred
 746,029 bytes versus 540,942 for the initial root, again about 38% more.
+
 `Cache::insert` discarded the duplicate pages after transfer, verification and
 decoding had already occurred. The measured excess is origin traffic; neither
 38% lower service latency nor a fleet throughput gain has been demonstrated.
 
 **Evidence map.** The public entry is
-[`VerifiedRoot::open_read_only`](../../cellule-ltx/src/replica.rs), with connection
+[`VerifiedRoot::open_read_only`](../../cellule-ltx/src/replica/mod.rs), with connection
 ownership in [`ReadOnlyRoot`](../../cellule-ltx/src/replica/read_only.rs).
 [`CellReadReplica::refresh`](../src/client/replica.rs) creates such replacement
 views after an exact root advances. This diagnostic exercises that LTX opening
 and SQL path directly; it excludes runtime routing and authority confirmation.
+
 [`Io::page` and `fetch`](../../cellule-ltx/src/paged_io.rs) check only the requested
 page before asking `read_run` for 64 pages. `read_run` returns the first
 contiguous immutable span in that window. It does not stop at an already cached
@@ -2815,6 +2989,7 @@ The sibling `Io::hydration_pages` already bounds a missing prefix before cached
 pages. Writable VFS demand reads install pages locally, so later reads can
 bypass this cache; immutable views repeatedly use it. The fix must preserve
 both consumers, rather than assuming their hit patterns are identical.
+
 Existing `read_only_roots_keep_exact_snapshots_without_materializing_pages`,
 `directory_nodes_are_shared_across_exact_root_views`, and the sparse hydration
 tests protect related correctness but do not assert demand-fetch byte reuse.
@@ -2863,6 +3038,7 @@ failed before the fix on overlapping origin ranges. Afterward it passes for
 payload hashes and requiring disjoint origin ranges within the isolated
 working set. A repeated scan issues no range reads. RustFS reports 21 ranges /
 544,913 bytes at 512-byte pages and five ranges / 540,912 bytes at 4-KiB pages.
+
 The earlier diagnostic and this regression use different payload generators;
 these counts are not a controlled latency comparison. Eleven sparse-writer
 and hydration tests, four pager cache/deadline tests, minimal-feature checking,
@@ -2894,6 +3070,7 @@ The follow-up [image run 36261394085](https://github.com/crabbuild/crab/actions/
 passes build, Compose startup, restore, crash recovery and restart with the
 demand-read fix. The receipt names merge source `a3a074cfa687`, whose tree
 `9aa8caaadb16bb7c3e8dec244b2ba558891e9849` matches branch head `6169c9c0270`.
+
 Receipt SHA256 is `38afbd6d821723db630cd84d3313fa1fdbeb88f782e96799c5e6f6d5400a7f27`;
 its image digest is `sha256:b3dd7c8bb12d627b5d9b3041d1456ef9b1ba8e3fda153a2f7ea863b7fd318d97`.
 The subsequent churn runner and measurement documents do not change production
@@ -2901,6 +3078,7 @@ runtime source. Fleet curves still require their separate receipt. Both
 architecture CI jobs at this branch head report the existing app-to-host
 development dependency, not a passing full qualification result.
 
+<a id="finding-29"></a>
 ### 29. Fleet recovery verification omitted the issue body
 
 The baseline load and owner-loss checks compared titles and sometimes issue
@@ -2913,6 +3091,7 @@ The common comparison now requires an integer issue number, matching title and
 complete body. Scheduled bodies include the run, Cell and arrival identity;
 creation responses, immediate reads, all-acknowledgement verification,
 published-root takeover and unpublished-tail takeover share this comparison.
+
 The functional scale and entry-route coverage checks also verify their initial
 issue bodies. The list API deliberately returns body `null`, so its duplicate
 scan retains ID/title checks and is paired with the detail readback gate.
@@ -2922,6 +3101,7 @@ Source: [HTTP create/detail and summary contracts](https://github.com/crabbuild/
 [scheduled actions](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/load.py), and
 [unpublished-tail recovery](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/fault.py).
 All 56 fleet harness tests pass with resource warnings treated as errors.
+
 Load schema 7 and fault schema 2 distinguish the stronger proof and changed
 payload from historical runs. Run 36265830657 exercises the stronger harness:
 eleven points pass full payload recovery, while the final ten-node point fails
@@ -2929,6 +3109,7 @@ post-loss readback (finding 30). Twenty-node and unpublished-tail coverage on
 that source remain unrun. The harness change adds no runtime or storage-format
 change and does not establish a latency improvement.
 
+<a id="finding-30"></a>
 ### 30. An inactive-log recovery claim serializes unrelated Cell takeovers
 
 **Observed:** the final ten-node point of run 36265830657 recovered `work-20`
@@ -2942,7 +3123,8 @@ before the kill.
 loads a `takeover_proof`, then calls `claim_expired_for_takeover` if absent.
 [The directory](../src/node/directory/recovery.rs) originally required the
 current claimant to match even when the tombstone had no active log.
-[The tombstone claim](../src/node/directory.rs) rejects other claimants until
+
+[The tombstone claim](../src/node/directory/mod.rs) rejects other claimants until
 expiry. Thus different Cells inherit an unnecessary node-wide exclusion.
 An inactive log reaches this error; an active log returns `PendingPublication`
 earlier in the request path. This separates the observed symptom from an
@@ -2951,10 +3133,11 @@ at `396e0ab1b40` and in the measured image `8e61bcf3ad2`.
 
 The correct ownership boundary is a permanent expired-session fence plus a
 separate CAS for each Cell. An absent/inactive log cannot have acknowledged
-follower-only state: [node durability](../src/node/durability.rs) activates the
+follower-only state: [node durability](../src/node/durability/mod.rs) activates the
 authoritative log before issuing follower proof. A tombstone prevents a stale
 enrollment from activating later. An active log must still complete exclusive
 recovery and pin its overlays before other nodes receive takeover proof.
+
 [Cell takeover](../src/cell/actor/acquire.rs) checks the old session, verifies
 the claimant, reloads current control, CASes ownership and restores the exact
 root before serving. Sharing the node fence must preserve each of those steps.
@@ -2997,6 +3180,7 @@ image digest is
 `sha256:4193bb3ec8ff41960e0727c026d42fcc6541738acd52e4778a21e1cc1e362d3a`;
 receipt SHA256 is
 `b795e97c26f78be7cdd4dabea22ddee165bdb715575870377a43783708ca84bc`.
+
 The downloaded receipt also passes the canonical `validate-cluster` command
 on Rust 1.98 in source-only mode. This is process-loss evidence, including
 unpublished follower state, but does not replace the failed multi-Cell rate
@@ -3006,10 +3190,12 @@ Uniform [fleet run 36274405084](https://github.com/crabbuild/crab/actions/runs/3
 failed during initial repository provisioning with that image: image and stage
 source `ce02ac2e0f7`, job/fault harness `4741628d0db`. All three nodes were
 healthy; a request raced catalog propagation and returned HTTP 403 (finding 32).
+
 The report has no completed stages or timed load points. This run does not
 retest the multi-Cell recovery fix or supply capacity evidence. The full
 3/5/10/20-node arrival and recovery gates remain open.
 
+<a id="finding-31"></a>
 ### 31. The archive check adds a serialized Cell invocation before mutations
 
 **Measured:** at ten nodes and 50 offered pairs/s, the archive-state check's
@@ -3026,6 +3212,7 @@ At the measured baseline, [HTTP middleware](https://github.com/crabbuild/crab/bl
 and executes `GetRepositoryLifecycle`; then the handler separately routes its
 mutation. [CreateIssue](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/repository.rs) validates
 and deduplicates its input without checking archive state in that transaction.
+
 The preflight exists on `origin/main`; action instrumentation only exposes its
 cost. Existing [HTTP/mTLS coverage](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/server_peer_e2e_tests.rs)
 expected this query, so it is not an accidental trace attribution.
@@ -3068,6 +3255,7 @@ The public fixture requires zero routed queries for an unlabeled create/edit
 and one for label enrichment, while retaining its existing owner-loss and
 durability checks. The initial memory-backed fixture passed in 46.33 seconds;
 the same flow against pinned RustFS 1.0 GA on Colima passed in 36.61 seconds.
+
 Eight focused HTTP tests also passed, covering all seven archived endpoints,
 invalid-input precedence, authorization, duplicate creation, issue/comment
 edits, labels and recovery. These are single correctness runs on a shared host;
@@ -3079,6 +3267,7 @@ through its application router and signed mTLS command clients. Each round
 has a known preceding write, four concurrent label commands delivered twice,
 and a known following write. Every accepted result precedes archive's durable
 commit sequence; every rejection follows it. Duplicate receipts must match.
+
 After owner fencing, shutdown, local-data loss and takeover, all 24 outcomes
 replay with their original receipts. Accepted rows match exactly, rejected rows
 are absent, and replay preserves the authority root at owner loss.
@@ -3094,6 +3283,7 @@ Matched offered-load curves, prolonged multi-Cell archive/load/fault stress and
 policy conversion of other mutation families remain open. Do not infer a p99
 or throughput improvement from query counts or these functional run durations.
 
+<a id="finding-32"></a>
 ### 32. Catalog propagation can reject a newly created Cell before load starts
 
 **Observed:** run 36274405084 created repositories while three serving nodes
@@ -3110,6 +3300,7 @@ latency or throughput measurement.
 materialize a local catalog before serving, then replace it on a five-second
 poll. [Peer authorization](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/peer.rs) looks up the
 repository in that local snapshot before resolving or executing its Cell.
+
 A missing repository fails closed with the observed error. The entry node's
 catalog visibility does not prove its peer's visibility. The same local
 authorization and polling boundaries exist at `origin/main` `396e0ab1b40`.
@@ -3124,6 +3315,7 @@ then marks it ready. Nodes load that completed catalog on startup. The existing
 Compose dependency chain waits for RustFS health and successful release setup
 before the repository initialization command; these are the documented
 [Compose startup conditions](https://docs.docker.com/compose/how-tos/startup-order/).
+
 Subsequent scale stages reuse those repositories. All 403s remain fatal.
 Startup-order and provisioning-failure regressions fail before this change and
 pass after it; all 65 deterministic fleet harness tests pass. An exact-source
@@ -3162,13 +3354,15 @@ after an acknowledged body update, rejection of old/corrupt payloads, and both
 entry points rejecting a wrong-source image before starting nodes. These are
 harness regressions; full live reader and rollout qualification remains open.
 
+<a id="finding-33"></a>
 ### 33. Planning at the discovery start time suppresses fresh heartbeats
 
 **Reproduced:** the [repository router](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs)
 read its clock before awaiting the signed node-directory scan. A heartbeat
 published during that scan has an issue time later than the captured clock.
+
 The directory permits bounded clock skew, but the
-[placement planner](../src/fleet/placement.rs) deliberately rejects observations
+[placement planner](../src/fleet/placement/mod.rs) deliberately rejects observations
 from the future. Its complete-fleet count rule consequently returns no balance
 when even one otherwise current member was published during discovery. The
 same sequencing exists on `origin/main` at `396e0ab1b40`.
@@ -3183,6 +3377,7 @@ clock-boundary defect; the test does not attribute the whole fleet delay to it.
 placement snapshot. Discovery starts with the current clock, then observations
 are evaluated against a new clock sample after the read. Expired advertisements
 are excluded at that point; a partial view still cannot justify count balancing.
+
 The planner's future-time rejection, freshness window, source residence,
 settlement, transfer limits and authority gates remain intact. Initial placement
 still reloads its selected canonical advertisement, and remote activation uses
@@ -3199,10 +3394,12 @@ ownership authority by this change.
 **Fleet evidence:** [run 36291618746, attempt 2](https://github.com/crabbuild/crab/actions/runs/36291618746/attempts/2)
 used the prior a62 AMD64 image. Eight of twelve load points at 3/5/10 nodes
 passed; all 14,256 admitted pairs succeeded and passed integrity/recovery checks.
+
 The four failed points omitted 144 scheduled arrivals at the generator. At
 20 nodes, the first balanced sample arrived at 554 seconds, the next had
 28 seconds of stability at 582 seconds, and the final had 62 seconds at
 616 seconds. The strict 600-second gate rejected that final observation.
+
 No 20-node load or unpublished-tail fault ran. The failure is retained; it
 cannot establish that ownership never balanced or that this clock fix closes
 the convergence budget. Report SHA-256:
@@ -3211,6 +3408,7 @@ the convergence budget. Report SHA-256:
 **Verification:** all three focused router transfer tests pass, including the
 new regression and the existing stale-generation/restored-value checks. The
 same transfer regression passes against pinned RustFS 1.0 GA (2.69 seconds).
+
 The full public HTTP/mTLS fixture also passes against GA (178.63 seconds):
 application mutations, duplicate outcomes, owner takeover, restored collaboration
 and native Git reads. Its archive race records 24 outcomes, 8 creates and
@@ -3224,11 +3422,13 @@ corrects both live placement callers without relaxing the pure planner or
 extending the qualifier deadline. Exact-source 20-node convergence and load
 remain required before claiming a latency improvement.
 
+<a id="finding-34"></a>
 ### 34. Concurrent catalog publishers can restore revoked access
 
 **Reproduced:** on `63ca7a724f7` (affected sources unchanged on `main`
 `1b3702cbd9e`), import completion and periodic catalog
 refresh both materialize a complete repository index after awaiting Git metadata.
+
 The index loses the durable document revision, and each writer replaces it
 unconditionally. Holding an older import document while refresh installs a
 membership revocation restores the revoked member when that import finishes.
@@ -3248,6 +3448,7 @@ compares and publishes the revision, name map, and UUID map under one write lock
 discarding equal or older completions. Startup installs that same versioned
 shape. Import and periodic refresh call one `Server::install_catalog` path,
 which verifies ready Cells and materializes Git metadata before publication.
+
 The poller reads the shared installed revision rather than a private counter.
 It still rejects a provider document older than the revision observed before
 the read. A later concurrent installation can supersede an otherwise valid
@@ -3257,6 +3458,7 @@ The HTTP and UUID regressions pass after the fix. An additional test rejects a
 new revision containing an uninitialized ready Cell without changing the
 installed revision or exposing that repository. The RustFS HTTP test is part of
 the existing provider CI gate and uses an isolated prefix for each invocation.
+
 This change adds no request-path provider I/O, polling interval, wire field,
 stored format, or dependency. Membership administration still authorizes against
 the current durable catalog; data, Git, LFS, and peer routes share the protected
@@ -3264,6 +3466,7 @@ in-memory indexes. Five-second propagation to other nodes and the first-request
 creation race in finding 32 remain separate work; finding 35 addresses the
 remote execution node's first-request miss.
 
+<a id="finding-35"></a>
 ### 35. A lagging execution node must discover a new repository before dispatch
 
 **Reproduced:** with the revision-safe installer from finding 34, an ingress
@@ -3278,6 +3481,7 @@ catalog load through `Server::install_catalog`, bounded by the existing signed
 request deadline. The same installer verifies ready Cells and publishes the
 revision, name index, and UUID index atomically. A shared async lock coalesces
 concurrent first requests; waiters recheck the index after acquiring it.
+
 Cancellation releases the lock. The receiver then evaluates the principal and
 operation against the installed catalog, and normal dispatch retains its final
 authorization check before SQL.
@@ -3295,6 +3499,7 @@ mutation also performs no catalog reads. Focused tests cover sixteen concurrent
 misses sharing one installation, fresh membership revocation during discovery,
 and a timed-out lock waiter followed by a successful refresh. The existing
 provider CI runs the same HTTP/mTLS scenario against RustFS.
+
 The local scenario passes with both in-memory storage and RustFS 1.0 GA
 (`sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`)
 on Colima. The HTTP nodes in this fixture run as separate listeners in one
@@ -3309,6 +3514,7 @@ fixture does not establish multi-host capacity, throughput, or a latency limit.
 Cold discovery materializes the complete catalog, so its cost still grows with
 catalog size and requires large-catalog qualification.
 
+<a id="detail-05"></a>
 ## Safety and proof retained by the audit
 
 Both the [ARM64 image/Compose run](https://github.com/crabbuild/crab/actions/runs/36239430827)
@@ -3352,6 +3558,7 @@ The original one-shot assertion rejects the retained mismatch consistently.
 The Compose collector now brackets each advertisement with fresh metrics,
 checks static capacities and the expected live session, and requires the same
 active count at two increasing generations on one unchanged container boot.
+
 It fails on persistent mismatch, stagnant/regressing advertisements, malformed
 metrics, restarts or the 30-second deadline. The final receipt retains the
 matched node/metrics; the run log retains the convergence trace. Thirteen
@@ -3389,6 +3596,7 @@ storage and real RustFS, including five concurrent calls after hint expiry,
 owner loss, restored collaboration state, and Git clone/tag reads. Both tests
 completed in 13.05 seconds together; that duration is not an action-latency
 sample. Focused admission, enrollment-expiry, and signature regressions pass.
+
 The runtime accepted-command cancellation test also passes. All-target Clippy
 with warnings denied passes for LTX, runtime, and HTTP, including the minimal
 LTX feature set. Replica-only continuation helpers now share their callers'
@@ -3446,14 +3654,17 @@ already verified recovered issue visibility. The missing counter evidence must
 not be treated as data loss or successful image qualification. Source tracing
 found that the gate sampled only the elected successor, which need not be the
 recovery claimant, and compared it with physical `server-c`'s earlier counters.
+
 The qualifier now derives work from each surviving process's own before/after
 snapshots, rejects resets or missing data, and retains those snapshots in the
 receipt. Six deterministic cases cover the distinct claimant/owner roles,
 aggregation, process changes, invalid counters, and inactive-log zero work.
+
 The native ARM64 [follow-up run 36219430132](https://github.com/crabbuild/crab/actions/runs/36219430132)
 passed the corrected Compose gate at `a16c8efcc2b`, including owner loss and
 follower recovery. That result qualifies that source's functional fault path;
 it predates decoder commit `0360485311b` and the routing/checksum changes above.
+
 It supplies neither sustained 3/5/10/20-node latency curves nor current-head
 image qualification.
 The [HTTP container run at `0360485311b`](https://github.com/crabbuild/crab/actions/runs/36220235482)
@@ -3463,6 +3674,7 @@ also passed, along with that revision's decoder fuzz workflow. Routing commit
 The no-job property-workflow failure has a reproduced configuration cause:
 job-level `env` referenced `runner.temp`, but GitHub only exposes that context
 at the later [step environment boundary](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+
 The repository's pinned actionlint v1.7.11 rejects the previous file at that
 expression. Moving the existing target-directory setting to both Cargo steps
 passes the same check and preserves the 1,000-case workload. The repaired
@@ -3470,6 +3682,7 @@ passes the same check and preserves the 1,000-case workload. The repaired
 passed both runtime and LTX suites at `8586757a6eb`. The follow-up
 [property run 36224241056](https://github.com/crabbuild/crab/actions/runs/36224241056)
 passes at worker-admission revision `b8798fdcfdc`.
+
 [Native ARM64 container run 36222681957](https://github.com/crabbuild/crab/actions/runs/36222681957)
 passes at `7b20ebe484f`; it predates worker admission and image-provenance
 enforcement. The separate app-to-host dev-dependency policy failure remains open.

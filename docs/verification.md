@@ -1,6 +1,6 @@
 # Synthesis verification — 2026-09-27
 
-Crab source: `beb439039cb37e750afe6625a2358101c70d1191`.
+Historical import source: `beb439039cb37e750afe6625a2358101c70d1191`.
 Cellule base: `56b35ab`. See the [synthesis ledger](synthesis.md) for adaptations.
 
 ## Environment
@@ -16,7 +16,7 @@ Cellule base: `56b35ab`. See the [synthesis ledger](synthesis.md) for adaptation
 
 | Proof | Result |
 | --- | --- |
-| Crab capability parity | 504 files match after mechanical naming and the reviewed adaptation patch; shared dependency contracts match. |
+| Historical import parity | 504 files match after mechanical naming and the reviewed adaptation patch; shared dependency contracts match. |
 | Drift checker failure cases | Rejects changed source, leftover modules, changed workspace dependencies, and adaptation conflicts. |
 | All targets/features | `cargo check --workspace --all-targets --all-features --locked` passed. |
 | Workspace tests | `cargo test --workspace --all-features --locked --no-fail-fast` passed; 33 ignored test results require separate environments or explicit selection. |
@@ -71,16 +71,15 @@ renamed test cannot silently produce a successful zero-test smoke run.
 - Imported dated performance reports retain their upstream provenance; they are
   not fresh Cellule benchmark results.
 
-## Reproduce
+## Reproduce current checks
 
 Use [CONTRIBUTING.md](../CONTRIBUTING.md) for local checks and
 [the Rust workflow](../.github/workflows/rust.yml) for the isolated RustFS service,
 bucket setup, environment, and exact process-smoke command.
 
 ```sh
-python3 scripts/check-crab-sync.py --crab-source /path/to/Crab
 python3 scripts/check-boundaries.py
-python3 scripts/check-cell-ltx-layout.py
+python3 scripts/check-module-layout.py
 python3 scripts/check-doc-rust-fences.py
 node crates/cellule-runtime/docs/validate.mjs
 ```

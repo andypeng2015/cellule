@@ -22,7 +22,7 @@ subsequent refresh, placement eviction, and shutdown use the production
 - Build used a fresh target and exact cached image digests. Only downloaded
   Cargo dependencies were shared with the earlier qualification project.
 
-Reproduce with the [Compose procedure](../PERFORMANCE.md#three-constrained-compose-nodes),
+Reproduce with the [Compose procedure](2026-09-27-qualification-notes.md#three-constrained-compose-nodes),
 30 iterations per primitive lane, and a fresh state directory/project.
 
 ## Verified behavior

@@ -1,5 +1,5 @@
 // Contains adapted Celld lib.rs source at the revision in UPSTREAM.md.
-// Apache-2.0; modified by Crab contributors. See LICENSE.
+// Apache-2.0; Cellule owns this adaptation. See LICENSE and UPSTREAM.md.
 
 //! Local SQLite WAL capture and exact, checksum-verified LTX recovery.
 //!

@@ -79,7 +79,7 @@ assert(!/^\s*service\s/m.test(peer), 'private contract must not generate a publi
 assert(!/\b(?:WorkflowDecision|WorkflowAction)\b/.test(peer), 'native decisions do not cross peer RPC');
 assertions += 2;
 
-const scratch = mkdtempSync(path.join(tmpdir(), 'crab-cell-contracts-'));
+const scratch = mkdtempSync(path.join(tmpdir(), 'cellule-contracts-'));
 try {
   const compile = spawnSync('protoc', [
     `--proto_path=${contracts}`,
@@ -139,9 +139,11 @@ for (const name of readdirSync(root).filter(name => name.endsWith('.md'))) {
     const target = path.resolve(root, file || name);
     assert(existsSync(target), `${name}: missing ${match[1]}`);
     if (anchor && target.endsWith('.md')) {
-      const headings = [...readFileSync(target, 'utf8').matchAll(/^#+\s+(.+)$/gm)]
+      const targetText = readFileSync(target, 'utf8');
+      const headings = [...targetText.matchAll(/^#+\s+(.+)$/gm)]
         .map(m => m[1].toLowerCase().replace(/[^\p{L}\p{N}_\-\s]/gu, '').replace(/ /g, '-'));
-      assert(headings.includes(anchor), `${name}: missing anchor ${match[1]}`);
+      const explicitAnchors = [...targetText.matchAll(/<a id="([^"]+)"><\/a>/g)].map(m => m[1]);
+      assert(headings.includes(anchor) || explicitAnchors.includes(anchor), `${name}: missing anchor ${match[1]}`);
     }
     links++;
   }

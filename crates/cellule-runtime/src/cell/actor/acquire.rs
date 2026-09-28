@@ -724,7 +724,7 @@ impl CellRuntime {
             .inner
             .replica_host
             .clone()
-            .with_directory_cache(scratch_directory.join(".crab-cell-directory-cache"))
+            .with_directory_cache(scratch_directory.join(".cellule-directory-cache"))
             .await?;
         Ok(replica.with_host(host))
     }

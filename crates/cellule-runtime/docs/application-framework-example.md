@@ -1,5 +1,32 @@
 # Build a complete Commerce application
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+## Navigate this reference
+
+- [Follow the application flow](#detail-01)
+- [Organize the application crate](#detail-02)
+- [Declare stable values and identifiers](#detail-03)
+- [Register the complete application](#detail-04)
+- [Store the Order aggregate in a SQL Cell](#detail-05)
+- [Store shopping carts in KV](#detail-06)
+- [Reserve inventory in sharded SQL Cells](#detail-07)
+- [Coordinate checkout with Workflow](#detail-08)
+- [Charge through an external activity](#detail-09)
+- [Project customer queries into a read-model Cell](#detail-10)
+- [Deliver fulfillment through Queue](#detail-11)
+- [Store invoices through Blob](#detail-12)
+- [Trigger subscription renewals through Cron](#detail-13)
+- [Compose and start a Cell node](#detail-14)
+- [Adapt an authenticated HTTP route](#detail-15)
+- [Resolve an ambiguous mutation](#detail-16)
+- [Exercise the public application surface](#detail-17)
+- [Prove owner loss and retry safety](#detail-18)
+- [Understand what each primitive contributes](#detail-19)
+
+
 This example exercises the complete proposed application framework over the
 Cell runtime: custom SQL entity and read-model Cells, KV, Blob, Queue, Cron,
 Workflow, cross-Cell effects, external activities, generated clients, node
@@ -26,6 +53,7 @@ router, while
 generated clients, complete operator ownership, and protected provider
 qualification still require the remaining plans.
 
+<a id="detail-01"></a>
 ## Follow the application flow
 
 The Commerce application uses every persistence and coordination primitive for
@@ -70,6 +98,7 @@ There is no multi-Cell transaction. Each arrow is either a published command,
 a durable effect with inbox deduplication, or a leased activity with an explicit
 external idempotency contract.
 
+<a id="detail-02"></a>
 ## Organize the application crate
 
 The application keeps domain code separate from node and transport policy:
@@ -103,6 +132,7 @@ The generated module contributes `generated::CommerceClient`, descriptor
 fixtures, typed namespace accessors, operation dispatch, and release bytes. It
 does not contain application authorization or provider credentials.
 
+<a id="detail-03"></a>
 ## Declare stable values and identifiers
 
 All values that cross the runtime boundary use a bounded canonical codec. The
@@ -158,6 +188,7 @@ pub const CUSTOMER_ORDER_INDEX: NamespaceId = NamespaceId::from_bytes([0x08; 16]
 Changing a constant creates a different namespace and therefore different Cell
 IDs. A rename leaves the constant unchanged.
 
+<a id="detail-04"></a>
 ## Register the complete application
 
 The application registry includes every target before a node becomes ready.
@@ -223,6 +254,7 @@ impl CommerceClient {
 }
 ```
 
+<a id="detail-05"></a>
 ## Store the Order aggregate in a SQL Cell
 
 Each order is an entity Cell selected by `OrderId`. Its SQL migration is
@@ -337,6 +369,7 @@ impl Query for GetOrder {
 }
 ```
 
+<a id="detail-06"></a>
 ## Store shopping carts in KV
 
 Carts are small scoped records, so they share fixed KV shards rather than
@@ -390,6 +423,7 @@ let updated = carts
 Both mutations and the version check execute in one KV shard transaction. The
 fixed 256-shard count is part of the release topology.
 
+<a id="detail-07"></a>
 ## Reserve inventory in sharded SQL Cells
 
 Inventory needs an atomic quantity invariant and therefore uses custom SQL.
@@ -446,6 +480,7 @@ impl Command for ReserveInventory {
 Inventory and checkout do not commit atomically. The workflow retains the
 pending-line set and compensates already reserved lines if another line fails.
 
+<a id="detail-08"></a>
 ## Coordinate checkout with Workflow
 
 The workflow Cell is selected by `OrderId`. Its deterministic transition emits
@@ -542,6 +577,7 @@ impl WorkflowDefinition for CheckoutV1 {
 The workflow definition digest is pinned when a run starts. A rolling release
 retains `CheckoutV1` while any stored run still names that digest.
 
+<a id="detail-09"></a>
 ## Charge through an external activity
 
 The activity runs only after its claim root publishes. The payment provider
@@ -584,6 +620,7 @@ The supervisor publishes the completion event back into the workflow. Dropping
 the worker future does not erase the durable claim or make an external charge
 exactly once; provider idempotency closes that boundary.
 
+<a id="detail-10"></a>
 ## Project customer queries into a read-model Cell
 
 Customer history is not queried by scanning Order Cells. A projection command
@@ -620,6 +657,7 @@ Projection identity derives from the source order and source commit sequence,
 so repeated effect delivery is harmless. The API documents that this read model
 is asynchronous and cannot satisfy an Order Cell receipt.
 
+<a id="detail-11"></a>
 ## Deliver fulfillment through Queue
 
 Fulfillment is at least once. Producers hash by order ID; workers claim one
@@ -709,6 +747,7 @@ The application supplies a stable request identity for every ack or retry. A
 worker crash after external work but before ack repeats `fulfill`, so each
 external destination must deduplicate by the job or order identity.
 
+<a id="detail-12"></a>
 ## Store invoices through Blob
 
 Invoice metadata and its manifest live in one Blob shard transaction domain;
@@ -764,6 +803,7 @@ Part digests are verified on write and range read. `complete` publishes the
 manifest atomically with request outcome and Blob state. It does not expose a
 separate uncommitted body path.
 
+<a id="detail-13"></a>
 ## Trigger subscription renewals through Cron
 
 Cron stores the schedule and advances one occurrence in the same transaction
@@ -801,6 +841,7 @@ limit before readiness. An owner crash cannot lose an occurrence after its
 schedule advance publishes, and destination inbox deduplication prevents the
 same occurrence from starting the workflow twice.
 
+<a id="detail-14"></a>
 ## Compose and start a Cell node
 
 The service binary constructs one node. Application code never assembles
@@ -852,6 +893,7 @@ process signals remain service concerns. The node owns Cell admission,
 activation, peer routing, followers, publication, recovery, scheduling,
 placement, eviction, backup integration, and ordered shutdown.
 
+<a id="detail-15"></a>
 ## Adapt an authenticated HTTP route
 
 The external route authorizes the product action before calling the generated
@@ -896,6 +938,7 @@ The HTTP request ID is stable across client retries. A `Pending` response means
 the mutation may have started and must be resolved; the adapter must not create
 a new request ID and submit the business operation again.
 
+<a id="detail-16"></a>
 ## Resolve an ambiguous mutation
 
 The generated pending token contains the target, incarnation, request identity,
@@ -923,6 +966,7 @@ row. `Unknown` means the framework cannot yet prove absence or a committed
 outcome. Incarnation change fails closed rather than searching stale local
 state.
 
+<a id="detail-17"></a>
 ## Exercise the public application surface
 
 An ordinary application test uses generated APIs and observes every primitive:
@@ -973,6 +1017,7 @@ The test may poll workflow and projection state because those paths are
 asynchronous. It uses the Order receipt only for an Order query, not for the
 customer read model or Blob namespace.
 
+<a id="detail-18"></a>
 ## Prove owner loss and retry safety
 
 The application qualification test kills the owner after the command is
@@ -1031,6 +1076,7 @@ Every acknowledged order must remain queryable. Every duplicate request must
 return the same durable decision or an explicit unresolved state. Corruption,
 fencing, and incompatible releases fail closed.
 
+<a id="detail-19"></a>
 ## Understand what each primitive contributes
 
 | Primitive | Commerce use | Boundary demonstrated |

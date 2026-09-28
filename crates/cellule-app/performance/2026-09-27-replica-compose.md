@@ -7,7 +7,7 @@ automatic reader replacement require separate qualification.
 
 ## Reproduce the measured source
 
-Use the [Compose procedure](../PERFORMANCE.md#three-constrained-compose-nodes)
+Use the [Compose procedure](2026-09-27-qualification-notes.md#three-constrained-compose-nodes)
 with 30 iterations per primitive lane and a fresh source archive/state directory.
 
 - Source: `a815f9ad46bf700b1f603da2ea7cf15d07fa2713`.

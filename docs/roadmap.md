@@ -1,7 +1,7 @@
 # Framework scope and next gaps
 
-The current implementation follows the Crab revision recorded in
-[the synthesis ledger](synthesis.md). The supported author primitives are SQL,
+Cellule owns the current framework implementation. The
+[historical import record](synthesis.md) is provenance, not an upstream contract. The supported author primitives are SQL,
 KV, Blob, Queue, Cron, Workflow, Activities, and Effects. They share one actor,
 transaction/publication path, bounded maintenance, and exact-root recovery.
 

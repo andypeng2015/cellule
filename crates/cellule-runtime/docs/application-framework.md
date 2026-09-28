@@ -1,5 +1,34 @@
 # Build large applications on the Cell runtime
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+## Navigate this reference
+
+- [Design for application owners](#detail-01)
+- [Use four topology patterns](#detail-02)
+- [Separate the author and operator APIs](#detail-03)
+- [Declare one application](#detail-04)
+- [Declare an entity Cell](#detail-05)
+- [Write deterministic commands](#detail-06)
+- [Write receipted queries](#detail-07)
+- [Generate an application client](#detail-08)
+- [Make provisioning explicit](#detail-09)
+- [Compose built-in primitives](#detail-10)
+- [Coordinate across Cells](#detail-11)
+- [Run external work as activities](#detail-12)
+- [Host applications through one node facade](#detail-13)
+- [Keep deployment artifacts canonical](#detail-14)
+- [Make local development representative](#detail-15)
+- [Apply one resource model](#detail-16)
+- [Preserve explicit consistency contracts](#detail-17)
+- [Keep security at the correct boundary](#detail-18)
+- [Deliver in vertical slices](#detail-19)
+- [Reject convenient but unsafe shortcuts](#detail-20)
+- [Define success from the owner's perspective](#detail-21)
+
+
 Crab should expose an application framework above `cellule-runtime` so an
 application owner defines durable Cell types, typed operations, partitioning,
 and cross-Cell workflows without constructing catalogs, authority records,
@@ -27,6 +56,7 @@ Workflow, effects, activities, generated clients, node composition, HTTP
 adaptation, and owner-loss qualification. It is not a production evidence
 claim until the full-primitive workload and protected provider gates pass.
 
+<a id="detail-01"></a>
 ## Design for application owners
 
 An application owner should make five durable decisions:
@@ -57,6 +87,7 @@ interpret peer messages, or retry ambiguous SQL mutations. Product adapters
 continue to own authentication, authorization, HTTP or RPC policy, and mapping
 external identities to application identities.
 
+<a id="detail-02"></a>
 ## Use four topology patterns
 
 Large applications compose four Cell patterns. The application declares the
@@ -88,6 +119,7 @@ the same derivation for provisioning, and `ApplicationHandle` checks its encodin
 This provides an application-validated target for an application's own split protocol; it
 does not repartition or migrate data automatically.
 
+<a id="detail-03"></a>
 ## Separate the author and operator APIs
 
 The public framework has two capability levels.
@@ -128,6 +160,7 @@ as the compiled registry. The host checks this before returning the handle,
 so a client assembled with a different release cannot dispatch through an
 application descriptor that validated a different set of operations.
 
+<a id="detail-04"></a>
 ## Declare one application
 
 The initial framework remains statically linked Rust. Attributes reduce
@@ -177,6 +210,7 @@ Every namespace declaration contains:
 Names are diagnostic. IDs, partition bytes, operation IDs, codec versions, and
 migration digests are persistent contracts.
 
+<a id="detail-05"></a>
 ## Declare an entity Cell
 
 An entity Cell co-locates one aggregate's transactional state. The application
@@ -215,6 +249,7 @@ digest of the scope as its partition bytes. The application retains the mapping
 from logical entity ID to target; the catalog retains the target bytes needed
 for routing and recovery.
 
+<a id="detail-06"></a>
 ## Write deterministic commands
 
 The framework reuses the current typed `Command` contract. Attributes may
@@ -269,6 +304,7 @@ The handler's application savepoint and the runtime request ledger commit in
 one SQLite transaction. A business rejection rolls back application writes but
 still records and publishes its typed outcome.
 
+<a id="detail-07"></a>
 ## Write receipted queries
 
 Queries are typed, bounded, and read-only. Generated clients expose consistency
@@ -299,10 +335,12 @@ pub enum ReadConsistency {
 `After(receipt)` additionally requires the same Cell and incarnation and a
 commit sequence at or beyond the receipt. The framework does not expose an
 unfenced local-file read or a global timestamp spanning Cells.
+
 The implemented client API uses `client::ReadPolicy::{CurrentOwner, Replica}`
 on a cloned capability and an optional minimum `Receipt` on each typed query.
 `CellClient::with_read_policy` and `ApplicationHandle::with_read_policy` select
 the policy; generated clients retain it when deriving scoped accessors.
+
 Commands, resolution, state streams, and Queue/Effects/Workflow activity lease
 validation still use the owner. Replica queries
 report their actual snapshot receipt, reject a newer minimum with
@@ -324,19 +362,23 @@ reads. It loads authority and the S3 desired count concurrently, rejects a
 policy from a different incarnation, and consults signed live membership. It
 prefers lower ingress-observed in-flight load, and bounds selection and all
 attempts by one five-second deadline. Peer attempts carry the remaining budget.
+
 Advisory reader discovery shares a bounded one-second membership snapshot
 across directory clones and Cells, with one concurrent refresh. Selection
 filters expired advertisements each time; a failed expired refresh returns an
 error. Successful local enrollment and withdrawal invalidate this discovery
 snapshot.
+
 The same signed snapshot supplies the owner's immutable boot identity for
 physical-node exclusion; an absent owner is inspected directly, including its
 retirement tombstone. Authority, peer authentication, and offline maintenance
 scans remain fresh.
 The author handle does not expose storage, local files, or routing internals.
+
 Fresh authority checks remain mandatory before a replica releases a result.
 Blob queries hydrate content-addressed parts with digest and length checks;
 missing or reclaimed parts fail instead of returning unverified bytes.
+
 The object durability profile supplies the all-node-loss contract;
 [Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
 tracks remaining qualification work. Replica views now fault authenticated
@@ -345,6 +387,7 @@ provisionally reserves 12 MiB and four descriptors, including a conservative
 charge for the shared page cache; refresh retains both views until old queries
 finish. Sparse I/O uses the query deadline and preserves its source error.
 
+<a id="detail-08"></a>
 ## Generate an application client
 
 The generated client binds tenant, application, registry, and routing once.
@@ -409,6 +452,7 @@ a public HTTP authorization model. A product may add generated Axum, tonic, or
 other transport adapters later, but those adapters must require an explicit
 authorization function before constructing an application invocation.
 
+<a id="detail-09"></a>
 ## Make provisioning explicit
 
 Queries never create state. A mutating API chooses one of two declared
@@ -435,6 +479,7 @@ resources before claiming ownership, installs runtime and application schemas,
 publishes the initial root, and only then executes later mutations. Concurrent
 create attempts adopt only the exact same catalog and control result.
 
+<a id="detail-10"></a>
 ## Compose built-in primitives
 
 Applications should use primitive capabilities when their contract fits rather
@@ -478,6 +523,7 @@ Primitive registration contributes its schema, maintenance work, operations,
 and effect targets to the same application descriptor. It does not start a
 second runtime or durability path.
 
+<a id="detail-11"></a>
 ## Coordinate across Cells
 
 Cross-Cell effects use a transactional outbox and destination inbox:
@@ -500,6 +546,7 @@ This supplies durable at-least-once delivery and idempotent destination
 execution. It does not supply an atomic transaction across Order and Inventory.
 `EffectSource::status(effect_id, minimum_receipt)` reads the source state,
 attempt, lease deadline, expiry, and recorded result through the typed host.
+
 It reports whether a lease token exists without returning the token. A source
 effect can be removed after its delivery horizon, so callers must treat an
 absent status as unknown rather than proof that delivery never happened.
@@ -513,6 +560,7 @@ Application owners choose one of three outcomes:
 The registry rejects undeclared destination namespaces and cross-tenant effect
 targets before writes.
 
+<a id="detail-12"></a>
 ## Run external work as activities
 
 Activities are the only application extension that may call external systems.
@@ -539,6 +587,7 @@ The external destination must honor the supplied idempotency key when duplicate
 execution is unacceptable. A Cell transaction cannot roll back an external
 side effect, and activity lease expiry can cause another attempt.
 
+<a id="detail-13"></a>
 ## Host applications through one node facade
 
 `CellNode` is the missing public composition boundary. It owns the current
@@ -592,6 +641,7 @@ Application code cannot obtain the internal runtime handle from
 `ApplicationHandle`. This prevents a generated client from bypassing namespace,
 schema, codec, or authorization boundaries with an arbitrary closure.
 
+<a id="detail-14"></a>
 ## Keep deployment artifacts canonical
 
 One application build produces:
@@ -613,6 +663,7 @@ An incompatible rollout uses maintenance activation and an explicit transform.
 The framework does not retain aliases, fallback readers, or dual-write paths
 for unreleased formats.
 
+<a id="detail-15"></a>
 ## Make local development representative
 
 The framework supplies a single-process development host that uses the same
@@ -651,6 +702,7 @@ The test host supports deterministic failure points for:
 An in-memory object store is useful for fast tests but does not count as
 provider, filesystem, process-loss, or power-loss qualification.
 
+<a id="detail-16"></a>
 ## Apply one resource model
 
 Application declarations provide bounds, not separate resource schedulers. The
@@ -679,6 +731,7 @@ Metrics aggregate by application, namespace, operation, role, and outcome.
 They do not use Cell ID as an unbounded metric label. Traces and bounded debug
 status may include a Cell ID when authorized.
 
+<a id="detail-17"></a>
 ## Preserve explicit consistency contracts
 
 The application API documents these guarantees:
@@ -704,6 +757,7 @@ The API does not claim:
 - Reads from stale local SQLite files
 - Success after a local SQLite commit without a durability proof
 
+<a id="detail-18"></a>
 ## Keep security at the correct boundary
 
 The application framework validates compiled capability relationships. The
@@ -728,6 +782,7 @@ Tenant and application IDs are bound into every target Cell ID. Generated
 clients bind those IDs once and cannot construct a target for another tenant
 without receiving a different authorized `ApplicationHandle`.
 
+<a id="detail-19"></a>
 ## Deliver in vertical slices
 
 ### Phase 1: stabilize the author surface
@@ -785,6 +840,7 @@ current target envelope.
 - Retain low-level LTX and authority surfaces as implementation APIs unless a
   separate expert contract is explicitly approved.
 
+<a id="detail-20"></a>
 ## Reject convenient but unsafe shortcuts
 
 - Do not expose `CellHandle::execute` as the normal application API.
@@ -799,6 +855,7 @@ current target envelope.
 - Do not make routing, placement, or cached metadata an ownership authority.
 - Do not advertise target scale before the application workload matrix passes.
 
+<a id="detail-21"></a>
 ## Define success from the owner's perspective
 
 The application framework is complete when an owner can:

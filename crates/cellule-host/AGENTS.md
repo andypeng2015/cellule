@@ -13,5 +13,5 @@ Scoped rules for `crates/cellule-host/`. Root guidance applies.
   wait for the lane. Fleet-level pacing stays with the planner's movement
   budget, so do not add a second per-node rate limit here.
 - Layout: the integration suite is `tests/node.rs` (with `tests/node/`). The
-  crate holds no in-src tests, so it has no `tests-allow-list.txt`.
-- Run `python3 scripts/check-cell-ltx-layout.py` after layout changes.
+  crate uses integration suites for public lifecycle behavior.
+- Run `python3 scripts/check-module-layout.py` after layout changes.

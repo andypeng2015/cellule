@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Authenticated HTTP transport and pinned mTLS for Crab Cell peers"
+description = "Authenticated HTTP transport and pinned mTLS for Cellule peers"
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

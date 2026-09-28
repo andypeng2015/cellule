@@ -5,7 +5,7 @@ measurement, not a supported capacity or latency profile.
 
 ## Reproduction and identity
 
-Use the [Compose procedure](../PERFORMANCE.md#three-constrained-compose-nodes)
+Use the [Compose procedure](2026-09-27-qualification-notes.md#three-constrained-compose-nodes)
 with `CELLULE_PERF_ITERATIONS=30` and a fresh project/state directory.
 
 - Source: `3de78e2edfb98055dafd66fd5ce348940064e58e`.

@@ -1,5 +1,32 @@
 # Execute the SQLite VFS and LTX Cell scaling plan
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+```mermaid
+flowchart LR
+    Control[Authority-pinned root] --> Sparse[Verified sparse VFS]
+    Sparse --> Read[Demand page read]
+    Sparse --> Hydrate[Bounded hydration]
+    Read --> Writer[Fresh managed SQLite writer]
+    Hydrate --> Writer
+    Writer --> LTX[Captured LTX cut]
+    LTX --> Control
+```
+
+## Navigate this reference
+
+- [Use the existing implementation](#detail-01)
+- [Baseline the current tree](#detail-02)
+- [Work packet 1: make the qualification comparable](#detail-03)
+- [Work packet 2: remove redundant peer resolution](#detail-04)
+- [Work packet 3: give ingress a bounded owner hint](#detail-05)
+- [Work packet 4: qualify the existing pager and durability paths](#detail-06)
+- [Work packet 5: prove application-level scale](#detail-07)
+- [Release decision](#detail-08)
+
+
 Crab already runs SQLite locally over a verified sparse VFS and captures LTX
 from its WAL. This plan hardens the request path around that implementation,
 qualifies cold recovery and durability, and proves an application made of many
@@ -15,16 +42,17 @@ replication protocol.
 
 [Back to the Cell runtime index](README.md)
 
+<a id="detail-01"></a>
 ## Use the existing implementation
 
 | Responsibility | Existing owner | Contract to preserve |
 | --- | --- | --- |
 | Product authentication, authorization, and ingress | [HTTP router](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs) and [peer receiver](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/peer.rs) | Authorize the target and action before dispatch; bound peer hops |
 | Cell identity, owner, epoch, lifecycle, root | [Cell authority](../src/control/authority.rs) | Only conditional control writes grant or change ownership |
-| Actor admission and one SQL writer | [Cell actor](../src/cell/actor.rs) | A fenced or draining actor refuses queued and new work |
-| Local SQLite, WAL capture, LTX | [Db](../../cellule-ltx/src/db.rs) | Local commit alone never releases a response |
-| Sparse exact-root page access | [Writable VFS](../../cellule-ltx/src/writable_vfs.rs) and [paged I/O](../../cellule-ltx/src/paged_io.rs) | Verify inherited pages, reserve disk, and create a fresh local file |
-| Durable acknowledgement | [Follower design](failover-and-followers.md) and [publication](../src/publication.rs) | A response follows object-root proof or the selected followers' fsync proof |
+| Actor admission and one SQL writer | [Cell actor](../src/cell/actor/mod.rs) | A fenced or draining actor refuses queued and new work |
+| Local SQLite, WAL capture, LTX | [Db](../../cellule-ltx/src/db/mod.rs) | Local commit alone never releases a response |
+| Sparse exact-root page access | [Writable VFS](../../cellule-ltx/src/writable_vfs/mod.rs) and [paged I/O](../../cellule-ltx/src/paged_io.rs) | Verify inherited pages, reserve disk, and create a fresh local file |
+| Durable acknowledgement | [Follower design](failover-and-followers.md) and [publication](../src/publication/mod.rs) | A response follows object-root proof or the selected followers' fsync proof |
 | Application-level cross-Cell work | [Application framework](application-framework.md) | One Cell transaction; durable effects and idempotent inboxes across Cells |
 
 The request and recovery paths should remain:
@@ -42,12 +70,14 @@ owner loss -> seal/recover acknowledged follower tail -> exact root
 A route hint, placement plan, or cached page is never Cell authority. A
 follower log stores recent LTX; it does not serve SQL. A durable response may
 precede object publication only when the selected follower proof covers it.
+
 The [canonical scaling contract](canonical-ltx-scaling.md) now includes explicit
 read-only replicas in object durability mode. [Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
 keeps their policy, receipt and response authority checks separate from owner
 reads. Qualify replica routing, refresh and promotion against the same resource
 budget; earlier owner-only measurements do not establish replica performance.
 
+<a id="detail-02"></a>
 ## Baseline the current tree
 
 The [20-node gateway record](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-gateway-load.md)
@@ -80,6 +110,7 @@ The command writes `report.json` and `load-3-stage.json`,
 node containers. The [local stage-load record](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-stage-load.md)
 captures one completed run. Omit `--load-stages` for the original functional
 check.
+
 That historical run used completion-paced lanes and one Cell per node. The
 current runner keeps Cell count and offered rate independent of node count;
 use `--cells`, `--load-rate`, `--load-duration`, and `--load-max-in-flight` to
@@ -118,6 +149,7 @@ This action test runs three application hosts in the test process against
 RustFS; it is a different topology from the Compose fleet. Its result must
 be labeled separately in any comparison.
 
+<a id="detail-03"></a>
 ## Work packet 1: make the qualification comparable
 
 **Change:** extend the existing Compose qualifier to run the current
@@ -155,11 +187,13 @@ point's samples, traces, resource observations, publication drain and owner-loss
 checks. Verified overload returns exit 2 with `passed: false`, allowing later
 controls to run; failed integrity or recovery stops the sequence. CI retains
 overload as capacity evidence and separately exercises unpublished-tail loss.
+
 Its completion status is not proof that every offered rate was served. The
 repeated control can reveal drift as data accumulates; it does not reset the
 database to its initial state. These curves are implemented but still require
 current-image execution before satisfying the exit gate.
 
+<a id="detail-04"></a>
 ## Work packet 2: remove redundant peer resolution
 
 The entry [router](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs) checks for an
@@ -167,7 +201,7 @@ actor-owned resident handle, then on a miss reads catalog, exact control,
 and live-owner state. On the receiving node,
 [peer handling](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/peer.rs) resolves the target to
 decide whether to activate or forward, then
-[dispatch](../src/peer/dispatch.rs) resolves it again before execution.
+[dispatch](../src/peer/dispatch/mod.rs) resolves it again before execution.
 This duplicates object-store metadata work on the common forwarded path.
 
 **Change:** make the receiver's one resolution available to dispatch through
@@ -182,6 +216,7 @@ request; the receiver must not execute using stale authority.
 than two on a forwarded read; owner-local resident reads still make zero
 object-store calls; malformed/unauthorized/stale peer requests fail closed;
 takeover, drain, and compatible rollout tests retain their existing outcomes.
+
 Use the current [public takeover test](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/tests/public_cell_takeover.rs)
 and [runtime residency tests](../tests/runtime/lifecycle/residency.rs)
 as entry points, then add one targeted receiver test for metadata calls and
@@ -208,9 +243,11 @@ The routed client now receives the exact description already read from Cell
 control and skips `Describe`. Its signed command/query/resolve payload carries
 the expected Cell ID, incarnation, code, and schema. The owner compares those
 fields before execution; actor fencing and product authorization still apply.
+
 Focused tests reject each stale field, retain signature binding, and preserve
 mutation digest, duplicate delivery, and unknown-result evidence. Clients
 without an observed route still obtain a description through their transport.
+
 The public comment-read test now proves one peer operation and one receiver
 catalog/control resolution through HTTP and mTLS over both in-memory storage
 and real RustFS, including owner loss and restored application data. Fourteen
@@ -218,6 +255,7 @@ typed client/effect tests and the three public-host ambiguity, recovery, and
 compatible-rollout cases pass. Current-image fleet latency qualification and
 packet 3's entry-router reads remain open.
 
+<a id="detail-05"></a>
 ## Work packet 3: give ingress a bounded owner hint
 
 After packet 2, measure whether entry-node metadata remains the dominant
@@ -275,18 +313,21 @@ against packet 1 without raising retries, 503s, or object-store requests
 per logical action. If the measured benefit is absent, remove the hint
 and keep packet 2's simpler routing path.
 
+<a id="detail-06"></a>
 ## Work packet 4: qualify the existing pager and durability paths
 
-Do not replace the [writable VFS](../../cellule-ltx/src/writable_vfs.rs).
+Do not replace the [writable VFS](../../cellule-ltx/src/writable_vfs/mod.rs).
 Exercise cold open, page fault, background hydration, resident promotion,
 idle eviction, and takeover over RustFS. A verified resident read has zero
 object-store calls; sparse reads count their exact root/page requests.
+
 Record p50/p95/p99, bytes, page I/O queue depth, disk reservations, and
 time to first read. Reject corrupted page digests, a changed exact root,
 insufficient disk, and a canceled hydration without reusing an unverified
 mutable file. B-tree-guided speculative prefetch stays disabled until recorded scan traces
 beat point reads under bounded provider latency, as required by the
 [canonical scaling contract](canonical-ltx-scaling.md).
+
 The current bridge already coalesces up to 64 pages per fault. Separately
 qualify that window's bytes consumed versus prefetched for point queries,
 random access, scans, and hydration; fewer calls alone do not prove lower cost
@@ -298,6 +339,7 @@ multi-Cell tails and first-mutation latency remain required.
 The [read-view RustFS audit](ltx-performance-audit.md#28-demand-read-ahead-fetches-a-cached-suffix-after-small-updates)
 reproduces two additional costs: fresh immutable views refetch unchanged page
 bodies, and a fragmented root's demand read-ahead refetches a cached suffix.
+
 Demand misses now share hydration's uncached-prefix selection within the
 existing window. Require no duplicated cached suffix in the regression, then compare
 point/random/scan traffic and cache churn. Next evaluate authenticated frame
@@ -315,7 +357,7 @@ now removes its complete input buffer; the decoder also streams its footer and
 omits unused replica lookup entries. The remaining observed-page index still
 needs memory qualification. The [audit findings 9–11 and 13](ltx-performance-audit.md)
 define the ownership constraints and focused failure tests for changing these
-paths. The [RustFS cleanup comparison](../../cellule-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
+paths. The [RustFS cleanup comparison](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#streaming-published-cut-cleanup-2026-09-26)
 measures this first change separately from public response latency.
 
 Worker admission now reserves capacity for each fixed SQL worker separately.
@@ -329,6 +371,7 @@ Hold database size and changed pages fixed while comparing fresh, sparse,
 resident-after-hydration, and clean-resumed Cells. [Audit finding 14](ltx-performance-audit.md#14-checksum-bookkeeping-depends-on-activation-history-and-uses-tiny-file-io)
 identifies a full checksum-array copy per cut in fresh sessions, individual
 checksum file I/O in restored sessions, and per-page reads during clean handoff.
+
 Measure checksum calls/bytes, allocations, eviction, and reactivation before
 choosing a common bounded block strategy. Benchmark first mutation and repeated
 updates in each state; a sparse-only capture result does not cover the fresh
@@ -338,7 +381,7 @@ For writes, attribute SQLite command time, LTX capture, follower append
 and fsync, root preparation, object CAS, queue wait, and final proof source.
 The runtime already supports follower and object proofs. Tune batching or
 publication only after traces show which wait dominates. Preserve the
-[acknowledgement and recovery implications](failover-and-followers.md#preserve-these-guarantees):
+[acknowledgement and recovery implications](failover-and-followers-detailed.md#preserve-these-guarantees):
 every released result is covered, and a successor seals/replays any
 follower-only tail before serving. Inject owner process and local-disk loss,
 one follower loss, RustFS delay/failure, and ambiguous CAS.
@@ -375,6 +418,7 @@ not claim a recovery percentile from one owner-loss sample.
 The [source audit](ltx-performance-audit.md) adds concrete experiments in
 execution order: small-body single PUT, zero-write disk-cache hits, bounded
 parallel checksum-directory loading, and incremental compaction metadata.
+
 Measure response proof and sustained drain alongside those changes. Keep
 root coalescing and durability-mode changes behind their stronger recovery
 gates. Qualify the runtime's 8/32-segment compaction boundaries and the
@@ -408,9 +452,10 @@ still walks the complete authenticated checksum directory. The fresh/restored
 comparison, allocation and handoff measurements, and sibling-Cell latency gate in
 [audit finding 14](ltx-performance-audit.md) remain open.
 
-The local [replica cost record](../../cellule-ltx/perf/README.md#cell-publication-cost-per-command)
+The local [replica cost record](../../cellule-ltx/perf/history/2026-09-benchmark-notes.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms
 at p50/p95 for a small successor-root preparation over loopback RustFS.
+
 That preparation writes five immutable objects for a small command. These
 measurements have different harnesses and are not an end-to-end latency
 decomposition. The runtime serializes publication for each Cell, even when
@@ -452,6 +497,7 @@ prefix; and the pending publication limit stays bounded. A faster object
 preparation that still cannot drain the offered hot-Cell rate is not a
 supported throughput increase.
 
+<a id="detail-07"></a>
 ## Work packet 5: prove application-level scale
 
 Use the existing [reference application](application-framework-example.md)
@@ -468,6 +514,7 @@ The load matrix needs three shapes: many evenly distributed Cells, a
 deliberately hot Cell, and skewed read/write Cells. At each of 3, 5, 10,
 and 20 nodes, report per-node CPU, memory, disk, active Cells, queue depth,
 object requests, and throughput curves over increasing client concurrency.
+
 Separate owner-local, forwarded, sparse, resident, fleet-proof, and
 object-proof actions. A fixed 20-lane rate is not the maximum throughput.
 Every successful write must have a visible readback or durable receipt and
@@ -507,11 +554,12 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-http-server --test public_cell_takeover --locked
 ```
 
-The reference application's [Compose smoke](../../cellule-app/PERFORMANCE.md#three-constrained-compose-nodes)
+The reference application's [Compose smoke](../../cellule-app/performance/2026-09-27-qualification-notes.md#three-constrained-compose-nodes)
 now runs three public hosts as separate 1-CPU/1-GiB containers against GA
 RustFS, with signed peer requests, a round-robin ingress, generated-client
 duplicate/readback proof, and renewable signed sessions withdrawn after drain.
 The source-selected child test and Compose wrapper reject zero-test runs.
+
 This seven-Cell, six-lane integration check is the starting point for this
 packet; the larger application distribution, fault, and capacity matrix remains
 open.
@@ -521,12 +569,13 @@ Cells across three public hosts. It verifies generated targeting, per-Cell
 request deduplication, visible receipt-bound readback, and stored 4/4/4 ownership
 through a signed load balancer and GA RustFS. Its hosts share one process;
 the many-Cell process, workload-shape, resource, and capacity matrix above
-remains open. See [the runnable gate](../../cellule-app/PERFORMANCE.md#entity-targeting-correctness).
+remains open. See [the runnable gate](../../cellule-app/performance/2026-09-27-qualification-notes.md#entity-targeting-correctness).
 
 Run these before the scaled load, then repeat the relevant cases after any
 change to routing, admission, VFS, or durability. Build and broad provider
 proof belong in CI or a dedicated test environment.
 
+<a id="detail-08"></a>
 ## Release decision
 
 The work is ready for a supported profile only when:

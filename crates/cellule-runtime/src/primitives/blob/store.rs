@@ -1,11 +1,11 @@
-//! Durable Blob part store backed by the Crab object store.
+//! Durable Blob part store backed by the configured object store.
 
 use super::*;
 
 /// Object-store backing for Blob parts.
 ///
 /// SQLite stores only the bounded upload manifest and content digests. Part
-/// bytes are immutable, content-addressed objects in the configured Crab
+/// bytes are immutable, content-addressed objects in the configured
 /// object store and are verified again on every range read.
 #[derive(Clone)]
 pub struct BlobArtifactStore {
@@ -41,7 +41,7 @@ impl BlobGarbageCollectionReport {
 }
 
 impl BlobArtifactStore {
-    /// Wraps a configured Crab object store for Blob artifact data.
+    /// Wraps a configured object store for Blob artifact data.
     #[must_use]
     pub fn new(store: Store) -> Self {
         Self { store }

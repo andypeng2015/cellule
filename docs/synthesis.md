@@ -1,9 +1,9 @@
-# Crab synthesis ledger
+# Historical Cellule import record
 
 This workspace synthesizes reusable Cell and LTX infrastructure from
-[Crab](https://github.com/crabbuild/crab). Crab is authoritative for overlapping
-implementations in this refresh; Cellule keeps its framework packaging and
-existing naming contracts.
+[Crab](https://github.com/crabbuild/crab). Crab was the source for this one-time import. **Cellule now owns all Cell
+framework code and contracts.** Changes are made and reviewed here; there is
+no upstream parity gate or automatic re-import.
 
 | Field | Value |
 | --- | --- |
@@ -86,40 +86,22 @@ existing object prefix without migration. Validate persisted state and signed
 peer compatibility before switching an existing service. No published Cellule
 release tags existed in the destination at refresh time.
 
-## Keep capabilities synchronized
+## Ownership after the import
 
 ```mermaid
 flowchart LR
-    Crab[Clean Crab checkout] --> Rename[Mechanical framework names]
-    Rename --> Adapt[Reviewed adaptation patch]
-    Adapt --> Compare[Compare every capability file]
-    Cellule[Cellule source and tests] --> Compare
-    Compare --> Gate[Fail on drift or patch conflict]
+    Cellule[Cellule framework] --> API[Cell and LTX contracts]
+    Cellule --> Tests[Unit and integration suites]
+    Cellule --> Docs[Guides and examples]
+    Service[Embedding services] --> Cellule
 ```
 
-```sh
-python3 scripts/check-crab-sync.py --crab-source /path/to/Crab
-```
-
-The check covers 504 files: source, tests, schemas, manifests, API/test
-inventories, model checks, qualification harnesses, fuzz targets, and performance
-runners. Shared workspace dependencies are checked separately. Neither
-repository is modified.
-
-The small `scripts/crab-adaptations.patch` records intentional differences after
-mechanical naming; the extra peer transport tests are named explicitly.
-Documentation and standalone Cellule examples are maintained separately.
-
-| Trigger | Check |
-| --- | --- |
-| Pull request | Compare against the pinned synthesis revision. |
-| Daily scheduled job | Compare against Crab's current `main`; fail when capabilities drift. |
-| Manual workflow | Compare against a supplied Crab revision. |
-
-To advance the source, inspect upstream changes with their callers and tests,
-port them with Crab taking precedence, then review any adaptation conflict.
-Update the pinned revision and this ledger only after the capability check and
-verification pass. Do not regenerate the adaptation patch just to hide drift.
+The source revision and import adaptations above are historical evidence.
+They do not define a second implementation to follow. Review future behavior
+changes in Cellule, including callers, tests, persistence contracts, and docs.
+The previous source-comparison workflow and adaptation patch were retired.
+The [original synthesis ledger](synthesis-ledger-2026-09.md) remains available
+for its full mapping and verification history.
 
 The local LTX test adaptation removes fault expectations for placeholder fsyncs
 that Crab deliberately removed in `311105eb864` (`#469`). Creation failure,

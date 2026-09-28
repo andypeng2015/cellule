@@ -614,7 +614,7 @@ fn workload_root() -> cellule_ltx::Result<PathBuf> {
 
 fn temporary_directory(root: &Path, label: &str) -> cellule_ltx::Result<tempfile::TempDir> {
     tempfile::Builder::new()
-        .prefix(&format!("crab-cell-ltx-{label}-"))
+        .prefix(&format!("cellule-ltx-{label}-"))
         .tempdir_in(root)
         .map_err(Into::into)
 }

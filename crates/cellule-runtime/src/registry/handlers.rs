@@ -276,7 +276,7 @@ pub enum CommandResult<T> {
     Rejected(T),
 }
 
-/// Statically dispatched typed command implemented by compiled Crab code.
+/// Statically dispatched typed command implemented by compiled Cellule modules.
 pub trait Command: Send + Sync + 'static {
     /// Module the command is registered under.
     const MODULE: &'static str;
@@ -296,7 +296,7 @@ pub trait Command: Send + Sync + 'static {
     ) -> Result<CommandResult<Self::Output>>;
 }
 
-/// Statically dispatched typed query implemented by compiled Crab code.
+/// Statically dispatched typed query implemented by compiled Cellule modules.
 pub trait Query: Send + Sync + 'static {
     /// Module the query is registered under.
     const MODULE: &'static str;
@@ -353,7 +353,7 @@ pub struct QueryInvocation<'a> {
     pub input: &'a [u8],
 }
 
-/// Source-level module registration contract for statically linked Crab code.
+/// Source-level module registration contract for statically linked Cellule modules.
 pub trait CellModule: Send + Sync + 'static {
     /// Source-level module name, matched against its descriptor.
     const NAME: &'static str;

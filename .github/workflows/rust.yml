@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   workspace:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       rustfs:
         image: ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
@@ -41,8 +41,9 @@ jobs:
       - name: Architecture boundaries
         run: |
           python3 scripts/check-boundaries.py
-          python3 scripts/check-cell-ltx-layout.py
+          python3 scripts/check-module-layout.py
           python3 scripts/check-doc-rust-fences.py
+          python3 scripts/check-doc-links.py
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Documentation links
@@ -59,10 +60,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: cellule-integration-fixture
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          docker run --rm --network host \
-            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-            public.ecr.aws/aws-cli/aws-cli:2.27.41@sha256:1c2d7a51b1ff4f460bc3f1e1ee46a6cef47c7429ad9089ef99012a95e472a1a5 \
-            --endpoint-url http://127.0.0.1:9000 s3api create-bucket --bucket cellule-ci
+          aws --endpoint-url http://127.0.0.1:9000 s3api create-bucket --bucket cellule-ci
       - name: Run balanced three-process storefront smoke
         env:
           AWS_ACCESS_KEY_ID: cellule-ci
@@ -88,7 +86,7 @@ jobs:
         run: node crates/cellule-runtime/docs/validate.mjs
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:

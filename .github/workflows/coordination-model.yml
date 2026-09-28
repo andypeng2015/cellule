@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - "crates/cellule-runtime/model/**"
-      - "crates/cellule-runtime/src/coordination.rs"
+      - "crates/cellule-runtime/src/coordination/mod.rs"
       - "crates/cellule-runtime/src/coordination/**"
       - ".github/workflows/coordination-model.yml"
   schedule:

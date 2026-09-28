@@ -93,6 +93,8 @@ impl NodeDirectory {
                     let zone = candidate.failure_domain().zone();
                     let host = candidate.failure_domain().host();
                     let mut hasher = blake3::Hasher::new();
+                    // Keep this tie-break domain stable across releases so nodes
+                    // choose the same reader for a Cell during a mixed rollout.
                     hasher.update(b"crab-cell-read-replica-placement-v1");
                     hasher.update(cell.as_bytes());
                     hasher.update(candidate.node().as_bytes());

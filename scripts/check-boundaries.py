@@ -18,8 +18,8 @@ LAYERS = {
     "cellule-host": {"cellule-app", "cellule-runtime"},
     "cellule-peer-http": {"cellule-runtime"},
 }
-KERNEL = ROOT / "crates/cellule-runtime/src/coordination.rs"
-ACTOR = ROOT / "crates/cellule-runtime/src/cell/actor.rs"
+KERNEL = ROOT / "crates/cellule-runtime/src/coordination/mod.rs"
+ACTOR = ROOT / "crates/cellule-runtime/src/cell/actor/mod.rs"
 FORBIDDEN_KERNEL = (
     "async fn", ".await", "tokio::", "object_store", "rusqlite",
     "reqwest::", "std::fs", "std::net", "std::time", "rand::",
@@ -48,7 +48,7 @@ def main() -> int:
                 problems.append(f"{name} must use the local {dependency_name} workspace crate")
 
     kernel = KERNEL.read_text()
-    actor = "\n".join(path.read_text() for path in [ACTOR, *ACTOR.with_suffix("").rglob("*.rs")])
+    actor = "\n".join(path.read_text() for path in [ACTOR, *ACTOR.parent.rglob("*.rs")])
     for required in (
         "pub(crate) enum CoordinationInput", "pub(crate) enum CoordinationDecision",
         "pub(crate) struct CoordinationState", "pub(crate) fn step(&mut self, input: CoordinationInput)",
@@ -57,7 +57,7 @@ def main() -> int:
             problems.append(f"coordination kernel lost {required}")
     for number, line in enumerate(kernel.splitlines(), 1):
         if any(pattern in line for pattern in FORBIDDEN_KERNEL):
-            problems.append(f"coordination.rs:{number}: adapter dependency in pure kernel")
+            problems.append(f"coordination/mod.rs:{number}: adapter dependency in pure kernel")
     for required in ("CoordinationState", "coordination.step(CoordinationInput::"):
         if required not in actor:
             problems.append(f"actor lost coordination adapter {required}")

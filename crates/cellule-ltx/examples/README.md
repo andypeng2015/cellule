@@ -137,9 +137,9 @@ worker_compose run --no-deps --name "$worker_project-build" build \
 worker_compose run --no-deps --name "$worker_project-burst" \
   --entrypoint /target/release/examples/rustfs_cell_replica_scale_load \
   -e CELLULE_LTX_WORKLOAD_ROOT=/scratch -e CELLULE_LTX_TARGET_BYTES=33554432 \
-  worker --activation-cells 4 > "$CRAB_WORKER_STATE/evidence/burst.log" 2>&1
-docker --context "$CRAB_WORKER_CONTEXT" inspect "$worker_project-burst" \
-  > "$CRAB_WORKER_STATE/evidence/burst-container.json"
+  worker --activation-cells 4 > "$CELLULE_WORKER_STATE/evidence/burst.log" 2>&1
+docker --context "$CELLULE_WORKER_CONTEXT" inspect "$worker_project-burst" \
+  > "$CELLULE_WORKER_STATE/evidence/burst-container.json"
 ```
 
 ## Public API exercised

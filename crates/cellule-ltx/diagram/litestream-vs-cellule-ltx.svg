@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1120 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
   <title id="title">Litestream sidecar and cellule-ltx embedded architecture</title>
-  <desc id="description">Litestream operates background replication beside an application. Crab-ltx is embedded in the host runtime and prepares immutable data. Cell authority validates the observed owner and version, atomically publishes the selected root, and rejects stale writers.</desc>
+  <desc id="description">Litestream operates background replication beside an application. Cellule LTX is embedded in the host runtime and prepares immutable data. Cell authority validates the observed owner and version, atomically publishes the selected root, and rejects stale writers.</desc>
   <style>text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }</style>
   <defs>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">

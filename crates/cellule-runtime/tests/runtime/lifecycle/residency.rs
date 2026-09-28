@@ -86,9 +86,9 @@ async fn activation_opens_one_cache_at_the_database_directory_off_async_worker()
                 .database
                 .parent()
                 .unwrap()
-                .join(".crab-cell-directory-cache"),
-            directory.join(".crab-cell-directory-cache"),
-            directory.join(".crab-cell-directory-cache"),
+                .join(".cellule-directory-cache"),
+            directory.join(".cellule-directory-cache"),
+            directory.join(".cellule-directory-cache"),
         ]
     );
     assert!(

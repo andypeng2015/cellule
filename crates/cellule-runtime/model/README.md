@@ -1,7 +1,7 @@
 # Cell coordination model
 
 This directory contains the bounded TLA+ safety model for the private
-coordination kernel in `../src/coordination.rs`. It is a reviewable protocol
+coordination kernel in `../src/coordination/mod.rs`. It is a reviewable protocol
 model, not a model of SQLite, provider behavior, cryptographic signing, HTTP,
 or the primitive schemas.
 

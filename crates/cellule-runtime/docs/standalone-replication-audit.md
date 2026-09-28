@@ -1,5 +1,10 @@
 # Standalone replication compatibility audit
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+
 Status: **Decision recorded — HARD REMOVE executed by plan 017**. This record is
 the evidence boundary for the breaking cleanup; the canonical Cell path is the
 only shipped replication surface after this change.

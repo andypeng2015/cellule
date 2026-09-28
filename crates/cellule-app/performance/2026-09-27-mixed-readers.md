@@ -105,7 +105,7 @@ stopped; their volumes and evidence remain available.
 
 ## Reproduction and retained evidence
 
-Use the [scaling procedure](../PERFORMANCE.md#constrained-reader-scaling-and-loss)
+Use the [scaling procedure](2026-09-27-qualification-notes.md#constrained-reader-scaling-and-loss)
 with the default thirty primitive iterations. The existing Compose CI runs
 the same mixed windows and the evidence-verifier tests.
 
