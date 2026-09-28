@@ -6,8 +6,9 @@ defect even when no test compiles it: the docs are `rust,ignore` precisely
 because they need a provider, not because they may be syntactically broken.
 
 Rules:
-  1. Every ```rust fence in the framework guides and crates parses after being wrapped in
-     `fn main() { ... }`, so a statement snippet parses while a broken one fails.
+  1. Every ```rust fence in the root README, framework guides, and crates
+     parses after being wrapped in `fn main() { ... }`, so a statement snippet
+     parses while a broken one fails.
   2. Incomplete pseudocode uses a text fence; Rust fences must parse.
 """
 
@@ -74,19 +75,20 @@ def parses(body: str) -> str | None:
 def main() -> int:
     problems: list[str] = []
     checked = 0
+    paths = [ROOT / "README.md"]
     for crate in CRATES:
-        crate_path = ROOT / crate
-        for path in sorted(crate_path.rglob("*.md")):
-            if "target" in path.parts:
+        paths.extend(sorted((ROOT / crate).rglob("*.md")))
+    for path in paths:
+        if "target" in path.parts:
+            continue
+        relative = str(path.relative_to(ROOT))
+        for language, start, body in fences(path.read_text()):
+            if not language.startswith("rust"):
                 continue
-            relative = str(path.relative_to(ROOT))
-            for language, start, body in fences(path.read_text()):
-                if not language.startswith("rust"):
-                    continue
-                checked += 1
-                error = parses(body)
-                if error is not None:
-                    problems.append(f"{relative}:{start}: {error}")
+            checked += 1
+            error = parses(body)
+            if error is not None:
+                problems.append(f"{relative}:{start}: {error}")
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:
