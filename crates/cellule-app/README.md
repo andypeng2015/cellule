@@ -39,6 +39,10 @@ fn orders_topology() -> cellule_runtime::Result<CellType> {
 assert!(orders_topology().is_ok());
 ```
 
+For SQL Cells addressed directly by canonical 16-byte UUIDs, use
+`CellType::entity_uuid`. It has a separate persisted partition version from
+the 33-byte hashed entity mode. See [Topology](docs/topology.md).
+
 ```sh
 cargo run -p cellule-app --example application_descriptor --locked
 cargo run -p cellule-app --example orders --locked

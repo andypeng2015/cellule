@@ -180,6 +180,53 @@ fn generated_client_uses_the_declared_entity_partition() {
     }
 }
 
+struct UuidReferenceApplication;
+
+impl CellApplication for UuidReferenceApplication {
+    const NAME: &'static str = "uuid-reference-application";
+
+    fn register(builder: &mut ApplicationBuilder) -> Result<()> {
+        builder.register(ReferenceSql)?;
+        builder.cell_type(CellType::entity_uuid(SQL_MODULE, "orders", SQL_NAMESPACE)?)
+    }
+}
+
+cellule_app::cell_client! {
+    pub(crate) struct UuidReferenceClient (UuidReferenceApplication) {
+        pub(crate) fn orders(scope: &OrderId) -> UuidOrderCell {
+            namespace: SQL_NAMESPACE,
+            module: SQL_MODULE,
+            commands: { pub(crate) fn receive_cron, prepare_receive_cron: ReferenceCronReceiver = 6; },
+            queries: { pub(crate) fn receipt_count: ReferenceReceiptCount = 7; }
+        }
+    }
+}
+
+#[test]
+fn generated_client_routes_canonical_uuid_partitions() {
+    let application = Arc::new(
+        UuidReferenceApplication::compile(BuildDescriptor {
+            source_revision: "uuid-reference-source".into(),
+            cargo_lock_digest: Digest::from_bytes([42; 32]),
+        })
+        .unwrap(),
+    );
+    let handle = application_handle::<UuidReferenceApplication>(
+        application,
+        peer_round_trip(HashMap::new()),
+    );
+    let client = UuidReferenceClient::new(handle.clone()).unwrap();
+    let mut uuid = [0; 16];
+    uuid[6] = 0x70;
+    uuid[8] = 0x80;
+    let cell = client.orders(&OrderId(uuid.to_vec())).unwrap();
+    assert_eq!(cell.target().partition(), uuid);
+    assert!(handle.sql::<ReferenceSql>(cell.target().clone()).is_ok());
+    assert!(client.orders(&OrderId(uuid[..15].to_vec())).is_err());
+    uuid[8] = 0;
+    assert!(client.orders(&OrderId(uuid.to_vec())).is_err());
+}
+
 struct EntityPrimitiveApplication;
 
 impl CellApplication for EntityPrimitiveApplication {

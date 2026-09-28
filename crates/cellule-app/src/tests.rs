@@ -378,3 +378,59 @@ fn entity_topology_changes_application_descriptor() {
     let entity = builder.finish().unwrap();
     assert_ne!(fixed.descriptor_digest(), entity.descriptor_digest());
 }
+
+#[test]
+fn uuid_partitions_are_canonical_and_have_a_distinct_descriptor() {
+    let namespace = NamespaceId::from_bytes([2; 16]);
+    let fixed = CellType::new("app-sql", "orders", namespace, CatalogRole::Sql, 1).unwrap();
+    let hashed = fixed.with_entity_partitions().unwrap();
+    let uuid_type = CellType::entity_uuid("app-sql", "orders", namespace).unwrap();
+    assert_eq!(fixed.partition_version, 1);
+    assert_eq!(hashed.partition_version, ENTITY_PARTITION_VERSION);
+    assert_eq!(uuid_type.partition_version, UUID_PARTITION_VERSION);
+    assert!(uuid_type.shard_for_scope(b"one").is_err());
+    assert!(uuid_type.entity_partition(b"one").is_err());
+
+    let mut uuid = [0; 16];
+    uuid[6] = 0x70;
+    uuid[8] = 0x80;
+    assert!(uuid_type.valid_partition(&uuid));
+    assert!(!fixed.valid_partition(&uuid));
+    assert!(!hashed.valid_partition(&uuid));
+    assert!(!uuid_type.valid_partition(&uuid[..15]));
+    uuid[6] = 0;
+    assert!(!uuid_type.valid_partition(&uuid));
+    uuid[6] = 0x70;
+    uuid[8] = 0;
+    assert!(!uuid_type.valid_partition(&uuid));
+
+    let mut descriptors = Vec::new();
+    for cell_type in [fixed, hashed, uuid_type] {
+        let mut builder = ApplicationBuilder::new(
+            "app",
+            BuildDescriptor {
+                source_revision: "source".into(),
+                cargo_lock_digest: Digest::from_bytes([9; 32]),
+            },
+        )
+        .unwrap();
+        builder.register(SqlModule).unwrap();
+        builder.cell_type(cell_type).unwrap();
+        builder
+            .cell_type(
+                CellType::new(
+                    "app-sql",
+                    "inventory",
+                    NamespaceId::from_bytes([3; 16]),
+                    CatalogRole::Sql,
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        descriptors.push(builder.finish().unwrap().descriptor_digest());
+    }
+    assert_ne!(descriptors[0], descriptors[1]);
+    assert_ne!(descriptors[0], descriptors[2]);
+    assert_ne!(descriptors[1], descriptors[2]);
+}

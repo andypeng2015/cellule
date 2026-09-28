@@ -46,8 +46,9 @@ const DESCRIPTOR_MAGIC: &[u8] = b"cellule.application.v1\0";
 const MAX_APPLICATION_NAME_BYTES: usize = 128;
 const MAX_CELL_TYPES: usize = 128;
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
-const MAX_PARTITION_VERSION: u32 = 2;
+const MAX_PARTITION_VERSION: u32 = 3;
 const ENTITY_PARTITION_VERSION: u32 = 2;
+const UUID_PARTITION_VERSION: u32 = 3;
 const ENTITY_PARTITION_PREFIX: u8 = 1;
 
 /// One application-owned Cell topology declaration.
@@ -114,6 +115,21 @@ impl CellType {
         Ok(self)
     }
 
+    /// Declares one SQL Cell per canonical 16-byte UUID partition.
+    ///
+    /// UUID partitions use a distinct descriptor version from the 33-byte
+    /// entity digest mode and retain the UUID bytes as the Cell partition.
+    pub fn entity_uuid(
+        module: &'static str,
+        name: &'static str,
+        namespace: NamespaceId,
+    ) -> Result<Self> {
+        let mut cell_type = Self::new(module, name, namespace, CatalogRole::Sql, 1)?;
+        cell_type.partition_version = UUID_PARTITION_VERSION;
+        cell_type.validate()?;
+        Ok(cell_type)
+    }
+
     /// Replaces the schema range while retaining the stable Cell identity.
     pub fn with_schema_range(mut self, schema_min: u32, schema_max: u32) -> Result<Self> {
         self.schema_min = schema_min;
@@ -166,7 +182,7 @@ impl CellType {
 
     /// Maps one bounded application scope to its stable fixed shard number.
     pub fn shard_for_scope(&self, scope: &[u8]) -> Result<u32> {
-        if self.partition_version == ENTITY_PARTITION_VERSION {
+        if self.partition_version != 1 {
             return Err(Error::Identity("entity Cell type has no fixed shard"));
         }
         cellule_runtime::shard_for_scope(self.namespace, scope, self.shards)
@@ -185,7 +201,9 @@ impl CellType {
     /// raw identity, enters the catalog partition key.
     pub fn entity_partition(&self, scope: &[u8]) -> Result<[u8; 33]> {
         if self.partition_version != ENTITY_PARTITION_VERSION {
-            return Err(Error::Identity("Cell type uses fixed shards"));
+            return Err(Error::Identity(
+                "Cell type does not use hashed entity partitions",
+            ));
         }
         if scope.is_empty() || scope.len() > 1_024 {
             return Err(Error::Identity("invalid entity scope length"));
@@ -205,6 +223,9 @@ impl CellType {
         if self.partition_version == ENTITY_PARTITION_VERSION {
             return partition.len() == 33 && partition[0] == ENTITY_PARTITION_PREFIX;
         }
+        if self.partition_version == UUID_PARTITION_VERSION {
+            return canonical_uuid_partition(partition);
+        }
         let Ok(shard) = <[u8; 4]>::try_from(partition) else {
             return false;
         };
@@ -221,6 +242,8 @@ impl CellType {
             || self.partition_version == 0
             || self.partition_version > MAX_PARTITION_VERSION
             || (self.partition_version == ENTITY_PARTITION_VERSION && self.shards != 1)
+            || (self.partition_version == UUID_PARTITION_VERSION
+                && (self.role != CatalogRole::Sql || self.shards != 1))
             || self.schema_min == 0
             || self.schema_min > self.schema_max
             || self.database_limit_bytes < 512
@@ -477,7 +500,7 @@ impl<A: CellApplication> ApplicationHandle<A> {
         &self.compiled
     }
 
-    /// Derives a scoped target using the declared entity or fixed-shard topology.
+    /// Derives a scoped target using the declared partition topology.
     pub fn target_for_scope(&self, namespace: NamespaceId, scope: &[u8]) -> Result<CellTarget> {
         let cell_type = self
             .compiled
@@ -488,6 +511,14 @@ impl<A: CellApplication> ApplicationHandle<A> {
         if cell_type.partition_version == ENTITY_PARTITION_VERSION {
             let partition = cell_type.entity_partition(scope)?;
             return CellTarget::new(self.tenant, self.application, namespace, &partition);
+        }
+        if cell_type.partition_version == UUID_PARTITION_VERSION {
+            if !canonical_uuid_partition(scope) {
+                return Err(Error::Identity(
+                    "Cell target UUID partition is not canonical",
+                ));
+            }
+            return CellTarget::new(self.tenant, self.application, namespace, scope);
         }
         let partition = cell_type.partition_for_scope(scope)?;
         CellTarget::new(self.tenant, self.application, namespace, &partition)
@@ -648,7 +679,7 @@ impl<A: CellApplication> ApplicationHandle<A> {
         let cell_type = self.validate_namespace(namespace, module, role)?;
         // Namespace helpers derive four-byte shard targets internally. Accepting
         // an entity declaration here would bypass the application's topology.
-        if cell_type.partition_version == ENTITY_PARTITION_VERSION {
+        if cell_type.partition_version != 1 {
             return Err(Error::Identity(
                 "namespace capability requires fixed shards",
             ));
@@ -682,6 +713,10 @@ impl<A: CellApplication> ApplicationHandle<A> {
         }
         Ok(cell_type)
     }
+}
+
+fn canonical_uuid_partition(partition: &[u8]) -> bool {
+    partition.len() == 16 && (1..=8).contains(&(partition[6] >> 4)) && partition[8] >> 6 == 2
 }
 
 fn encode_descriptor(name: &str, registry: &Registry, cell_types: &[CellType]) -> Result<Vec<u8>> {
