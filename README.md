@@ -77,3 +77,6 @@ Run the [contributor checks](CONTRIBUTING.md) after code or docs changes. The
 proof from provider and production evidence. The [release guide](docs/releasing.md)
 lists packaging and publication gates. [LTX attribution](crates/cellule-ltx/UPSTREAM.md)
 ships with the crate.
+
+The [original synthesis overview](docs/workspace-reference.md) remains available
+as historical context for the import.
