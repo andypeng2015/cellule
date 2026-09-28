@@ -7,12 +7,55 @@ The application owns HTTP ingress, authorization, credentials, and deployment.
 
 ![Cellule component boundaries: application policy, typed API, host lifecycle, runtime, SQLite, object storage, and authority](diagram/cellule-overview.svg)
 
+## The Cell model
+
+An application compiles **modules** (what a Cell can do) and **Cell types**
+(which namespace, role, and partition rule each module uses). At runtime, a
+target selects one Cell. Its identity stays stable when a different node takes
+ownership:
+
+```text
+tenant + application + namespace + partition
+                     |
+                     v
+                stable Cell ID
+                     |
+                     v
+          one fenced writer at a time
+                     |
+                     v
+       managed SQLite: state + request outcomes
+```
+
+The fenced owner handles commands for that Cell. Authority records the current
+owner and pins the published root used for object-store recovery. LTX captures
+SQLite changes into verified, immutable objects. Your service still chooses
+tenants, authorizes callers, and supplies storage credentials and endpoints.
+
 | Term | Meaning |
 | --- | --- |
 | **Module** | Statically linked Rust code that declares schemas and operations. |
 | **Cell type** | A stable namespace, role, and partition rule compiled into an application descriptor. |
 | **Cell** | One addressed state partition with a single fenced writer. |
+| **Target** | Tenant, application, namespace, and partition used to address a Cell. |
+| **Request identity** | A stable ID and validity window for one logical mutation and its recorded outcome. |
 | **Receipt** | A returned observation position that a later read can require. |
+
+### Pick a Cell boundary
+
+One command changes one Cell, so place state that must commit together behind
+one target. A Cell type declares how targets are partitioned:
+
+| Partition rule | Target | When to use it |
+| --- | --- | --- |
+| Fixed shards | Hash a canonical scope into one of the declared shards. | Scoped collections such as settings or jobs. |
+| Entity partitions | Derive a partition from a stable entity key. | One independently owned Cell per entity. |
+
+The SQL lesson below uses one fixed shard. A namespace, role, partition rule,
+or shard-count change can alter persisted identity and routing; treat it as a
+reviewed application change. The [topology guide](crates/cellule-app/docs/topology.md)
+covers the exact rules. Work that spans Cells uses durable Effects and an
+idempotent destination inbox.
 
 ## Start locally
 
@@ -27,16 +70,18 @@ cargo run -p cellule-app --example workflow --locked
 cargo run -p cellule-app --example schedules --locked
 ```
 
-`basic` compiles two Cell types, starts a KV Cell and a Queue Cell, then writes
-and reads a setting and claims and acknowledges a job. `sql` shows SQL;
-`blob` shows Blob; `workflow` runs an Activity; `schedules` fires a Cron
-occurrence and delivers its Effect. Together they exercise all eight
-primitives through durable commands and typed handles. No cloud credentials
-are needed. Follow the
-[step-by-step quickstart](docs/quickstart.md) for expected output and a local
-recovery test.
+| Example | First thing to notice |
+| --- | --- |
+| [`basic`](crates/cellule-app/examples/basic.rs) | Two Cell types in one descriptor; a receipt-bound KV read and a leased Queue claim. |
+| [`sql`](crates/cellule-app/examples/sql.rs) | A parameterized write, durable receipt, and read of the committed order. |
+| [`blob`](crates/cellule-app/examples/blob.rs) | Staged parts become visible only after a Blob reference is completed. |
+| [`workflow`](crates/cellule-app/examples/workflow.rs) | A supervised Activity advances a durable Workflow. |
+| [`schedules`](crates/cellule-app/examples/schedules.rs) | A Cron tick emits an Effect that reaches an idempotent destination inbox. |
 
-![First Cell path: describe, start, commit, and observe at a receipt](diagram/first-cell.svg)
+Together these paths exercise all eight primitives through typed handles. No
+cloud credentials are needed. Follow the [step-by-step quickstart](docs/quickstart.md)
+for expected output and a local recovery test. Each source file starts with a
+run command and an ASCII outline of its path.
 
 ## Follow one complete application path
 
@@ -47,14 +92,26 @@ Cell, invokes it through a typed handle, checks the observed row, and drains
 the runtime. The snippets below are from that compiled example; keep the full
 source open if you are copying them into an application.
 
-| Stage | What the example establishes |
-| --- | --- |
-| Declare | `Orders` registers a SQL schema and stable command/query IDs. |
-| Compile | `OrdersApp` binds the module to a `CellType`; the descriptor pins source and lockfile digests. |
-| Provision | A `CellTarget`, catalog entry, authority record, and owner session identify one Cell. |
-| Bootstrap | `CellRuntime` opens managed SQLite and its LTX replica before the typed client is used. |
-| Invoke | A stable request ID identifies the order mutation; the returned receipt gates the read. |
-| Stop | Runtime shutdown runs on both success and error paths. |
+The path is a short sequence you can trace in `sql.rs`:
+
+1. **Describe** `Orders`: SQL schema, namespace, and stable command/query IDs.
+2. **Compile** `OrdersApp`: bind the module to a `CellType` and freeze the
+   descriptor and registry.
+3. **Provision** a `CellTarget`, catalog entry, and fenced owner.
+4. **Start** managed SQLite and an LTX replica for that Cell.
+5. **Commit** one parameterized SQL batch with a stable request identity; get
+   its output and receipt after the durability gate.
+6. **Observe** with `query(Some(receipt), ...)`; check the committed row.
+7. **Drain** the runtime on either success or failure.
+
+```text
+describe -> compile -> provision -> start -> commit -> observe -> drain
+                                         (request ID)  (receipt)
+```
+
+The example assembles a local owner and in-memory object store so that every
+step can run on one machine. A serving service assembles its provider, owner
+routing, and node lifecycle separately; see the [framework guide](docs/framework.md).
 
 ### Declare the application
 
@@ -165,6 +222,23 @@ from `ApplicationHandle`:
 | **Activities** | External work requested by a workflow. | `activities::<M>()` → `ActivitySupervisor` | Run outside SQLite with explicit supervision and lease checks. |
 | **Effects** | Delivery between Cells. | `effects::<M>(target)` → `claim`, `ack` | Source intent is durable; destination applies idempotently. |
 
+Primitives can be combined without treating multiple Cells as one SQL
+transaction. Two examples show where background supervisors enter the path:
+
+```text
+Recurring delivery:
+  Cron Cell -> due tick -> durable Effect -> supervisor -> destination inbox
+                                                        -> destination Cell
+
+External workflow step:
+  Workflow Cell -> Activity intent -> supervisor -> external work
+  Workflow Cell <- recorded completion <- supervisor <- result
+```
+
+The service installs and drains those supervisors. The destination must
+handle repeated delivery idempotently; a Queue consumer must likewise
+validate its lease and make external work safe to repeat.
+
 The [example map](crates/cellule-app/docs/examples.md) explains how each
 runnable path works, including the [Blob upload](crates/cellule-app/examples/blob.rs),
 [Workflow activity](crates/cellule-app/examples/workflow.rs), and
@@ -187,6 +261,39 @@ publication following. Recovery selects the authority-pinned root and verifies
 every required chunk; a bucket listing cannot choose state. If a response is
 lost, resolve the original request ID before retrying. See
 [architecture](docs/architecture.md) and [runtime execution](crates/cellule-runtime/docs/runtime.md).
+
+```text
+Reply received -> use the output and receipt
+Reply lost     -> keep the original request identity
+               -> resolve its recorded outcome
+                  |-- committed: use the recorded output and receipt
+                  |-- absent: retry the same prepared command if still valid
+                  `-- unknown or expired: investigate; do not invent a new ID
+```
+
+An owner-ordered query is the default. A read can require a minimum receipt
+from **that same Cell**. An explicitly selected replica must prove that it has
+reached the minimum or return a lag/unavailable error; it does not silently
+fall back to the owner. See [read policies](docs/api.md#choose-read-consistency)
+and [uncertain commands](docs/api.md#handle-an-uncertain-command).
+
+## From the local lesson to a service
+
+The examples supply a temporary database, in-memory objects, and a local
+fenced owner. To serve requests across nodes, the application must:
+
+1. Compile the same modules and Cell topology used by its typed clients.
+2. Choose and probe an object provider, then enroll a node with a live lease
+   and install the facilities it declares as required.
+3. Authenticate and authorize public requests before selecting tenant and
+   Cell targets; install a peer receiver if remote owner routing is needed.
+4. Supervise Activities, Effects, and scheduled maintenance that the service
+   uses, and drain accepted work before withdrawing the node session.
+
+The [framework integration guide](docs/framework.md) walks through readiness,
+peer boundaries, replicas, and shutdown. The local examples demonstrate API
+and durability mechanics; provider and process qualification have separate
+[evidence requirements](crates/cellule-runtime/docs/delivery.md).
 
 ## Go deeper
 
