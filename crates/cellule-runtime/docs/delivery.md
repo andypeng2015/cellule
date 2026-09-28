@@ -12,10 +12,7 @@ subsequent read observes it. Mocked unit checks alone do not prove wiring.
 | Process | Separate nodes with an object store. | Ignored three-process reference smoke. |
 | Production | Fault, load, provider, security, and rollout evidence. | Separate controlled environments. |
 
-```mermaid
-flowchart LR
-    Contracts --> Runtime --> Application --> Process --> Production
-```
+![Cellule qualification stages and protected release evidence](diagram/qualification-flow.svg)
 
 ```sh
 cargo test -p cellule-runtime --features test-support --locked
