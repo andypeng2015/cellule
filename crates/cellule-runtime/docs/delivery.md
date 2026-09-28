@@ -27,4 +27,16 @@ node crates/cellule-runtime/docs/validate.mjs
 The commands run from the workspace root. The [qualification harness](../qualification/README.md)
 separates local contracts from provider and multi-process gates.
 
+| Automated route | What it proves |
+| --- | --- |
+| [Qualification contract](../../../.github/workflows/qualification-contract.yml) | Profiles, receipts, runtime and LTX contracts. |
+| [Coordination model](../../../.github/workflows/coordination-model.yml) | Replayable kernel decisions and model checks. |
+| [Property qualification](../../../.github/workflows/property-qualification.yml) | Deeper scheduled runtime and LTX property searches. |
+| [LTX fuzz](../../../.github/workflows/ltx-fuzz.yml) | Decoder vector replay and scheduled fuzz searches. |
+| [Reference Compose](../../../.github/workflows/reference-compose.yml) | Typed application actions across constrained nodes and object storage. |
+
+The Compose run provides local provider and process evidence. Protected cloud
+provider and fault qualification still needs its named environment and signed
+evidence; it is not implied by a green Compose run.
+
 For test matrix, receipts, provider qualification, and evidence gates, read the [detailed reference](delivery-detailed.md).
