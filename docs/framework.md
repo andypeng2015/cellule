@@ -7,6 +7,9 @@ object-store credentials, endpoints, and deployment policy. Start with the
 [local quickstart](quickstart.md); its in-memory store and local owner show the
 mechanics without a serving fleet.
 
+The [visual overview](at-a-glance.md) shows a Cell, the component boundaries,
+and the path from declaration to a typed request.
+
 | Concern | Cellule API | Service decision |
 | --- | --- | --- |
 | Domain | `CellApplication`, `CellModule`, `CellType` | Which modules, schemas, and stable IDs ship in this binary. |

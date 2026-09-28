@@ -5,7 +5,10 @@ An application defines typed modules and Cell topology; Cellule runs commands
 through a fenced owner, publishes durable outcomes, and restores exact state.
 The application owns HTTP ingress, authorization, credentials, and deployment.
 
-![Cellule component boundaries: application policy, typed API, host lifecycle, runtime, SQLite, object storage, and authority](diagram/cellule-overview.svg)
+![Cellule architecture: application ownership, framework components, one durable Cell, and the eight primitives](diagram/cellule-components.svg)
+
+For a visual introduction to a Cell, its components, and the smallest
+integration path, see [Cellule at a glance](docs/at-a-glance.md).
 
 ## The Cell model
 
@@ -303,6 +306,7 @@ and durability mechanics; provider and process qualification have separate
 | Choose typed methods and handle outcomes | [API](docs/api.md) |
 | Understand ownership, storage, and recovery | [Architecture](docs/architecture.md) |
 | Embed Cellule in a serving service | [Framework integration](docs/framework.md) |
+| Understand Cells and integration options visually | [Cellule at a glance](docs/at-a-glance.md) |
 | Find the right crate or test | [Workspace reference](docs/reference.md) |
 | Evaluate current support and gaps | [Roadmap](docs/roadmap.md) |
 | Qualify and publish a matched crate set | [Release guide](docs/releasing.md) |
