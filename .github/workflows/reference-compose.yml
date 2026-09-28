@@ -3,7 +3,7 @@ name: Cell reference Compose smoke
 on:
   pull_request:
     paths:
-      - ".github/workflows/cell-reference-compose.yml"
+      - ".github/workflows/reference-compose.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
