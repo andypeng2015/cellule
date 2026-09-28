@@ -32,8 +32,10 @@ assert_ne!(tenant.as_bytes(), application.as_bytes());
 assert_eq!(namespace.as_bytes().len(), 16);
 ```
 
-Use the compiled [application topology example](../../cellule-app/README.md)
-and [orders command example](../../cellule-app/examples/orders.rs) for complete
+Use the current [Cellule API guide](../../../docs/api.md) for application
+composition, typed capabilities, receipts, and outcome handling. The compiled
+[application topology example](../../cellule-app/README.md) and
+[orders command example](../../cellule-app/examples/orders.rs) show complete
 registration and read-back. The application decides HTTP and user policy;
 no primitive is a public network endpoint by itself.
 

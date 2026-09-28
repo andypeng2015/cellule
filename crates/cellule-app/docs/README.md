@@ -2,6 +2,7 @@
 
 | Document | For |
 | --- | --- |
+| [Cellule API guide](../../../docs/api.md) | Public entry points, typed capabilities, receipts, and outcome handling. |
 | [Topology](topology.md) | Define identity, partitioning, and descriptor stability. |
 | [Invocations](invocation.md) | Send typed commands and receipt-bound queries. |
 | [Examples and tests](examples.md) | Run the authoring and end-to-end paths. |
