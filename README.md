@@ -316,3 +316,10 @@ tests from provider and production evidence. The dated
 [verification report](docs/verification.md) and
 [performance evidence](crates/cellule-app/PERFORMANCE.md) describe their
 recorded revisions and environments.
+
+## License
+
+The Cellule workspace crates are licensed under the [Apache License 2.0](LICENSE).
+The adapted `cellule-ltx` source retains [upstream attributions](crates/cellule-ltx/UPSTREAM.md)
+and a separate [BSD-3-Clause license](crates/cellule-ltx/LICENSE.pierrec-lz4)
+for its included LZ4 block implementation.
