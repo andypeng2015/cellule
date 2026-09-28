@@ -426,7 +426,7 @@ and costs one cold activation, never correctness.
 
 One node-level scanner renews owned Cells every three seconds. A mutation publication also advances owner progress.
 
-The runtime closes admission when it cannot prove ownership for ten seconds. It doesn't wait for the 15-second takeover window to expire.
+The runtime gives a control-record renewal up to thirty seconds under object-store pressure. A separate node-session guard closes admission at its signed expiry, even while renewal I/O is pending.
 
 Renewal changes owner liveness fields only. It preserves root, code, schema, and durable `next_due_ms`.
 

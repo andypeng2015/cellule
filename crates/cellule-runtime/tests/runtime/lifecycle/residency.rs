@@ -1903,3 +1903,53 @@ async fn idle_owner_progress_is_renewed_without_a_per_cell_task() {
     assert_eq!(renewed.value().revision, initial.value().revision + 1);
     handle.drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn slow_control_renewal_keeps_a_live_owner() {
+    let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let fixture = fixture_with_limits_and_store(
+        b"slow-control-renewal",
+        Limits::default(),
+        Store::new(store.clone()),
+    );
+    let (runtime, handle, _) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let initial = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .progress;
+    store.arm_next_update();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        store.wait_until_blocked(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    store.release();
+
+    let renewed = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            let current = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().progress > initial {
+                break current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        renewed.value().owner.as_ref().unwrap().session,
+        SessionId::from_bytes([4; 16])
+    );
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}

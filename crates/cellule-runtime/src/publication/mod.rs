@@ -14,7 +14,7 @@ const COMPACTION_CHECK_INTERVAL: u8 = 8;
 const COMPACTION_DEBT_SEGMENTS: usize = 32;
 const MAX_COMPACTION_CASCADE: usize = 9;
 const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
-const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) type NodeDurabilityBinding = (ApplicationId, std::sync::Arc<NodeDurability>);
 pub(crate) type NodeDurabilitySlot =
