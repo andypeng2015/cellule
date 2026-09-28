@@ -4,7 +4,7 @@ The short [runtime guide](README.md) is a route into the full documentation.
 These references retain limits, failure paths, examples, and design reasoning
 from the Cellule synthesis. Current contracts are owned by Cellule source and
 tests. Crab-specific HTTP routes and operations in older references describe
-the former embedding service.
+the former application.
 
 ```mermaid
 flowchart LR

@@ -45,9 +45,8 @@ pinned Celld subtree has no `NOTICE`; no Tokio runtime source was copied.
 | Resources | Bounded file, disk, I/O, scratch, and blocking-job admission. |
 
 The old standalone epoch-head, public page-map, and scheduler layouts are not
-read. The one-time Crab-to-Cellule adaptation is recorded in the
-[historical import record](../../docs/synthesis.md); it does not set future
-framework policy.
+read. The one-time Crab-to-Cellule adaptation does not set future framework
+policy.
 
 ## Compatibility boundary
 

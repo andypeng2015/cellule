@@ -1,14 +1,13 @@
 # Framework scope and next gaps
 
-Cellule owns the current framework implementation. The
-[historical import record](synthesis.md) is provenance, not an upstream contract. The supported author primitives are SQL,
+Cellule owns the current framework implementation. The supported author primitives are SQL,
 KV, Blob, Queue, Cron, Workflow, Activities, and Effects. They share one actor,
 transaction/publication path, bounded maintenance, and exact-root recovery.
 
 Current fleet mechanics include signed node enrollment, owner fencing,
 resource admission, pressure-driven shedding, immutable read replicas, fenced
 warm promotion, and host-owned recruitment and shutdown. The optional peer HTTP
-adapter supplies transport and mTLS pinning; the embedding service owns its
+adapter supplies transport and mTLS pinning; the application owns its
 receiver, authorization, credentials, and rollout policy.
 
 Next work must be driven by a concrete application and qualified against these

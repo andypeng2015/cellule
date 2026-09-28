@@ -34,7 +34,7 @@ assert_eq!(namespace.as_bytes().len(), 16);
 
 Use the compiled [application topology example](../../cellule-app/README.md)
 and [orders command example](../../cellule-app/examples/orders.rs) for complete
-registration and read-back. The embedding service decides HTTP and user policy;
+registration and read-back. The application decides HTTP and user policy;
 no primitive is a public network endpoint by itself.
 
 For registry, codec, context, client, and activity APIs, read the [detailed reference](rust-api-detailed.md).

@@ -1,7 +1,7 @@
 # cellule-host
 
 `CellNode` owns one runtime, its admission ledger, facilities, and task group.
-An embedding service supplies identity, provider, ingress, and authorization.
+An application supplies identity, provider, ingress, and authorization.
 
 ```mermaid
 stateDiagram-v2

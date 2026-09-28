@@ -10,7 +10,8 @@ From the workspace root:
 
 ```sh
 cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example authoring --locked
+cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example application_descriptor --locked
 cargo +1.97.0 check --workspace --all-targets --locked
 cargo test --workspace --all-features --locked
 cargo test -p cellule-ltx --features replica --locked
@@ -26,11 +27,11 @@ node crates/cellule-runtime/docs/validate.mjs
 
 On workstations with the mounted Workspace volume, always set `CARGO_TARGET_DIR` beneath the mounted
 `$HOME/Workspace/crabbuild-target`, with a unique directory per checkout. Use CI
-or a dedicated verification snapshot for broad suites and process tests. The [reference application smoke](docs/quickstart.md#run-the-reference-application) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
+or a dedicated verification snapshot for broad suites and process tests. The [application integration smoke](docs/quickstart.md#exercise-the-application-and-recovery) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
 
 ## Change boundaries
 
-Put provider-neutral transport in `cellule-store`, SQLite/LTX mechanics in `cellule-ltx`, authority and execution in `cellule-runtime`, typed application declarations in `cellule-app`, and node lifecycle in `cellule-host`. Product authentication, HTTP, credentials, and deployment policy belong to the embedding service. Run the boundary checker after dependency changes.
+Put provider-neutral transport in `cellule-store`, SQLite/LTX mechanics in `cellule-ltx`, authority and execution in `cellule-runtime`, typed application declarations in `cellule-app`, and node lifecycle in `cellule-host`. Product authentication, HTTP, credentials, and deployment policy belong to the application. Run the boundary checker after dependency changes.
 
 Cell IDs, object paths, LTX data, descriptors, schema versions, and signed peer messages are persisted or exchanged contracts. Before changing one, read its writer, reader, tests, and migration path. Add a runnable example or update the quickstart when author-facing behavior changes. Keep tests focused on observable behavior and failure recovery.
 

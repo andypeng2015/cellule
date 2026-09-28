@@ -1,11 +1,11 @@
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 # cellule-host
 
 `CellNode` owns one runtime, its admission ledger, facilities, and task group.
-The embedding service supplies providers, identity, ingress, and authorization.
+The application supplies providers, identity, ingress, and authorization.
 
 ```mermaid
 stateDiagram-v2

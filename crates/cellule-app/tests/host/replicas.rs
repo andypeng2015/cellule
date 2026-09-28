@@ -1,7 +1,7 @@
 //! Public host publication hints and reader shutdown.
 
 use super::*;
-use crate::reference_application::{performance_fixture, process_node};
+use crate::{performance_fixture, process_node};
 use futures_util::FutureExt;
 
 struct ReaderHints {

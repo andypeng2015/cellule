@@ -8,7 +8,7 @@ Read [the runtime guide](docs/README.md) before changing behavior.
 - Own Cell identity, authority CAS, actor and SQL execution, request outcomes,
   follower durability, placement, primitives, and qualification mechanics.
 - Leave HTTP ingress, product authorization, credentials, and provider
-  construction with the embedding service.
+  construction with the application.
 - Keep one canonical response gate: a successful command has an exact published
   root or recoverable follower proof.
 

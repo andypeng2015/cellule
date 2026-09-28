@@ -4,16 +4,17 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATES = tuple(sorted((ROOT / "crates").glob("cellule-*")))
 SUITES = {
     "cellule-runtime": ("runtime", "primitives", "protocol", "contracts", "fleet", "qualification"),
-    "cellule-app": ("reference_application",),
     "cellule-host": ("node",),
     "cellule-ltx": ("cell", "ltx", "host"),
 }
+FLAT_SUITES = {"cellule-app": ("contracts", "integration")}
 DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod ([a-z_][a-z_0-9]*)\s*;", re.M)
 TEST = re.compile(r"^\s*#\[(?:tokio::)?test", re.M)
 PATH = re.compile(r"#\[path\s*=")
@@ -67,6 +68,8 @@ def check_source(crate: Path) -> list[str]:
 def check_suites(crate: Path) -> list[str]:
     tests = crate / "tests"
     problems = []
+    if crate.name in FLAT_SUITES:
+        return check_flat_suites(crate)
     for suite in SUITES.get(crate.name, ()):
         root = tests / f"{suite}.rs"
         directory = tests / suite
@@ -93,6 +96,49 @@ def check_suites(crate: Path) -> list[str]:
                 or (crate / "src" / file.stem / "mod.rs").exists()
             ):
                 problems.append(f"{file.relative_to(ROOT)}: shadows a source module")
+    return problems
+
+
+def check_flat_suites(crate: Path) -> list[str]:
+    """Check explicit test targets whose modules live directly in tests/."""
+    tests = crate / "tests"
+    suites = FLAT_SUITES[crate.name]
+    problems = []
+    manifest = tomllib.loads((crate / "Cargo.toml").read_text())
+    declared_targets = {
+        target.get("name"): target.get("path") for target in manifest.get("test", [])
+    }
+    if manifest["package"].get("autotests") is not False:
+        problems.append(f"{crate.relative_to(ROOT)}/Cargo.toml: flat tests require autotests = false")
+    if declared_targets != {suite: f"tests/{suite}.rs" for suite in suites}:
+        problems.append(f"{crate.relative_to(ROOT)}/Cargo.toml: explicit test targets differ from {suites}")
+
+    roots = [tests / f"{suite}.rs" for suite in suites]
+    for root in roots:
+        if not root.is_file():
+            problems.append(f"{root.relative_to(ROOT)}: missing integration suite")
+        elif not TEST.search(root.read_text()):
+            problems.append(f"{root.relative_to(ROOT)}: suite has no tests")
+
+    for file in tests.glob("*.rs"):
+        if file in roots:
+            continue
+        owners = [root for root in roots if declared(file, root, file.stem)]
+        if len(owners) != 1:
+            problems.append(f"{file.relative_to(ROOT)}: expected one flat suite to declare mod {file.stem}")
+
+    for directory in tests.iterdir():
+        if not directory.is_dir() or directory.name in {"support", "vectors"}:
+            continue
+        entry = tests / f"{directory.name}.rs"
+        if not entry.is_file():
+            problems.append(f"{directory.relative_to(ROOT)}: missing module entry {entry.name}")
+            continue
+        for file in directory.rglob("*.rs"):
+            owner = declaration(file, tests)
+            name = file.parent.name if file.name == "mod.rs" else file.stem
+            if not declared(file, owner, name):
+                problems.append(f"{file.relative_to(ROOT)}: {owner.relative_to(ROOT)} does not declare mod {name}")
     return problems
 
 

@@ -1,6 +1,6 @@
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 # cellule-app
 
@@ -40,12 +40,14 @@ fn orders_topology() -> cellule_runtime::Result<CellType> {
 assert!(orders_topology().is_ok());
 ```
 
-For module descriptors and registration, run the [authoring example](examples/authoring.rs).
+For module descriptors and registration, run the [application descriptor example](examples/application_descriptor.rs).
 For a real command and receipt-bound read, run the [orders example](examples/orders.rs).
+For a multipart Blob write and receipt-bound read, run the [attachments example](examples/attachments.rs).
 
 ```sh
-cargo run -p cellule-app --example authoring --locked
+cargo run -p cellule-app --example application_descriptor --locked
 cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example attachments --locked
 ```
 
 ## Identity and routing contracts
@@ -79,15 +81,15 @@ deadline. Authors receive typed capabilities, not storage or transport handles.
 
 ## Verification map
 
-| Suite | Evidence |
+| Test file | Evidence |
 | --- | --- |
 | `tests/contracts.rs` | Descriptor, digest, and identity contracts. |
-| `tests/reference_application/primitives.rs` | Typed primitive writes, read-back, and exact-root owner recovery. |
-| `tests/reference_application/public_host.rs` | Signed peers, duplicate results, and owner loss. |
-| `tests/reference_application/public_host/replicas.rs` | Reader recruitment, refresh, and cancellation during drain. |
-| `tests/reference_application/public_host/rollout.rs` | Additive release with retained code and recovered receipts. |
-| `tests/reference_application/entities.rs` | Generated entity routing and isolated request ledgers. |
-| `tests/reference_application/process_performance.rs` | Separate-process fleet workload; ignored unless explicitly selected. |
+| `tests/primitives.rs` | Typed primitive writes, read-back, and exact-root owner recovery. |
+| `tests/host.rs` | Signed peers, duplicate results, and owner loss. |
+| `tests/host/replicas.rs` | Reader recruitment, refresh, and cancellation during drain. |
+| `tests/host/rollout.rs` | Additive release with retained code and recovered receipts. |
+| `tests/entities.rs` | Generated entity routing and isolated request ledgers. |
+| `tests/process_performance.rs` | Separate-process fleet workload; ignored unless explicitly selected. |
 
 ```sh
 cargo test -p cellule-app --locked

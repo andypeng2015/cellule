@@ -1,6 +1,6 @@
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 # Crab Cell peer HTTP transport
 
@@ -24,7 +24,7 @@ public key passed to it. The receiver must verify the peer envelope, enrollment,
 and product authorization before dispatching through `PeerDispatcher`.
 
 The crate provides no public ingress or credential discovery. Install a receiver
-at `internal/cells/v1/forward` only after the embedding service has wired its
+at `internal/cells/v1/forward` only after the application has wired its
 identity, enrollment, authorization, and readiness checks. Both owner-routed
 and direct-node requests reject bodies above `MAX_PEER_REQUEST_BYTES` and a
 zero deadline before provider lookup or dispatch.
@@ -32,4 +32,4 @@ zero deadline before provider lookup or dispatch.
 `cargo test -p cellule-peer-http --locked` covers both routes' admission bounds,
 real local HTTP retry/unknown-outcome classification, and TLS fleet identity
 canonicalization. The HTTP fixtures do not qualify deployed mTLS enrollment or
-certificate rotation; those require the embedding service's fleet tests.
+certificate rotation; those require the application's fleet tests.

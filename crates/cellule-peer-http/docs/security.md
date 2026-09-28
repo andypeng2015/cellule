@@ -8,7 +8,7 @@
 | Dispatcher | Execute only after receiver checks; keep request bounds. |
 
 The private forwarding path is `internal/cells/v1/forward`. Install it only
-inside the embedding service's authenticated peer ingress. This library does
+inside the application's authenticated peer ingress. This library does
 not discover credentials or authorize external users.
 
 ```mermaid
@@ -22,4 +22,4 @@ flowchart TD
 
 Local HTTP fixtures test retry and outcome classification. They do not prove a
 production certificate rotation or fleet enrollment deployment; qualify those
-in the embedding service.
+in the application.

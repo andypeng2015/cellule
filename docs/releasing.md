@@ -2,7 +2,7 @@
 
 The seven workspace crates publish to crates.io as `cellule-types`,
 `cellule-store`, `cellule-ltx`, `cellule-runtime`, `cellule-app`, and
-`cellule-host`, and the optional `cellule-peer-http`. They share one version: an embedding service depends on the
+`cellule-host`, and the optional `cellule-peer-http`. They share one version: an application depends on the
 set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
 
 ## Before the first release
@@ -61,9 +61,8 @@ token; nothing in this repository uploads on its own.
 ## After publishing
 
 - Tag the release and record the exact revisions in the release notes.
-- Embedding services can adopt the published `cellule-*` dependencies. Cellule
-  remains the source of truth for their contracts; `docs/synthesis.md` is
-  historical.
+- Applications can adopt the published `cellule-*` dependencies. Cellule
+  remains the source of truth for their contracts.
 - Keep the bundled attributions with the published crates: `cellule-ltx`
   ships `LICENSE` and `LICENSE.pierrec-lz4`, and its `UPSTREAM.md` must keep
   naming the Celld, rustyriver, Litestream, and LTX sources.

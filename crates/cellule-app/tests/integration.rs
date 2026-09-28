@@ -65,25 +65,23 @@ use cellule_store::Store;
 use ed25519_dalek::SigningKey;
 use object_store::memory::InMemory;
 
-mod reference_application {
-    pub mod application;
-    pub mod commit;
-    pub mod entities;
-    pub mod fleet;
-    pub mod harness;
-    pub mod performance;
-    pub mod performance_fixture;
-    pub mod primitives;
-    pub mod process_node;
-    pub mod process_performance;
-    pub mod process_recruitment;
-    pub mod process_replica;
-    pub mod process_scaling;
-    pub mod public_host;
-}
+mod application;
+mod commit;
+mod entities;
+mod fleet;
+mod harness;
+mod host;
+mod performance;
+mod performance_fixture;
+mod primitives;
+mod process_node;
+mod process_performance;
+mod process_recruitment;
+mod process_replica;
+mod process_scaling;
 
-pub(crate) use reference_application::application::*;
-pub(crate) use reference_application::harness::*;
+pub(crate) use application::*;
+pub(crate) use harness::*;
 
 #[test]
 fn application_descriptor_is_stable_when_modules_register_in_reverse_order() {
@@ -142,7 +140,7 @@ fn generated_client_release_descriptor_matches_independent_stable_ids() {
 }
 
 #[test]
-fn reference_application_registers_every_primitive_and_relationship() {
+fn application_registers_every_primitive_and_relationship() {
     let application = compiled();
     assert_eq!(application.cell_types().len(), 7);
     assert!(application.registry().has_effect_runner(SQL_NAMESPACE));

@@ -84,10 +84,7 @@ The [20-node gateway record](https://github.com/crabbuild/crab/blob/beb439039cb3
 is the comparison baseline, not a supported limit. In its fixed-load phase,
 385 of 400 requests entered nonowners, 23 HTTP 503 attempts were retried,
 read p95 was 389.089 ms, and write p95 was 783.251 ms. The observed 56.22
-logical requests/s is not saturation throughput. The three-node public-host
-[RustFS action record](../../cellule-app/performance/2026-09-25-public-host-rustfs.md)
-isolates local and forwarded actions but does not exercise the 20 Compose
-nodes. Both runs used one machine.
+logical requests/s is not saturation throughput. That run used one machine.
 
 Run from the repository root. Choose a fresh project and state directory for
 each comparison run. This disposable stack uses local RustFS credentials
@@ -140,8 +137,8 @@ CELLULE_TEST_PREFIX=reference-performance \
 AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
 CELLULE_PERF_ITERATIONS=100 \
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
-  cargo test -p cellule-app --test reference_application \
-  public_host::reference_public_host_rustfs_action_performance \
+  cargo test -p cellule-app --test integration \
+  host::reference_public_host_rustfs_action_performance \
   --release --locked -- --ignored --nocapture
 ```
 
@@ -542,19 +539,19 @@ Use the existing public-host cases as the first application correctness gate:
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
-  cargo test -p cellule-app --test reference_application \
+  cargo test -p cellule-app --test integration \
   three_node_host_resolves_ambiguous_result_and_deduplicates_delivery --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
-  cargo test -p cellule-app --test reference_application \
+  cargo test -p cellule-app --test integration \
   three_node_host_recovers_published_state_after_owner_loss --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
-  cargo test -p cellule-app --test reference_application \
+  cargo test -p cellule-app --test integration \
   three_node_host_additive_code_rollout_preserves_acknowledged_state --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-http-server --test public_cell_takeover --locked
 ```
 
-The reference application's [Compose smoke](../../cellule-app/performance/2026-09-27-qualification-notes.md#three-constrained-compose-nodes)
+The [application integration Compose smoke](../../cellule-app/qualification/compose.yaml)
 now runs three public hosts as separate 1-CPU/1-GiB containers against GA
 RustFS, with signed peer requests, a round-robin ingress, generated-client
 duplicate/readback proof, and renewable signed sessions withdrawn after drain.
@@ -569,7 +566,8 @@ Cells across three public hosts. It verifies generated targeting, per-Cell
 request deduplication, visible receipt-bound readback, and stored 4/4/4 ownership
 through a signed load balancer and GA RustFS. Its hosts share one process;
 the many-Cell process, workload-shape, resource, and capacity matrix above
-remains open. See [the runnable gate](../../cellule-app/performance/2026-09-27-qualification-notes.md#entity-targeting-correctness).
+remains open. See the [entity fleet runner](../../cellule-app/qualification/entities.py)
+and [host test](../../cellule-app/tests/entities/hosts.rs).
 
 Run these before the scaled load, then repeat the relevant cases after any
 change to routing, admission, VFS, or durability. Build and broad provider

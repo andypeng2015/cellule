@@ -1,6 +1,8 @@
 [package]
 name = "cellule-app"
 autoexamples = false
+# Integration modules live directly in tests/; only these two files are targets.
+autotests = false
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -26,10 +28,22 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-th
 tokio-util.workspace = true
 tracing-subscriber = "0.3"
 
+[[test]]
+name = "contracts"
+path = "tests/contracts.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
 [[example]]
-name = "authoring"
-path = "examples/authoring.rs"
+name = "application_descriptor"
+path = "examples/application_descriptor.rs"
 
 [[example]]
 name = "orders"
 path = "examples/orders.rs"
+
+[[example]]
+name = "attachments"
+path = "examples/attachments.rs"

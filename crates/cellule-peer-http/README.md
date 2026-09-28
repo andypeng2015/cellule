@@ -1,6 +1,6 @@
 # cellule-peer-http
 
-Optional HTTP transport for authenticated Cell peers. The embedding service
+Optional HTTP transport for authenticated Cell peers. The application
 owns ingress, enrollment, authorization, and credential lifecycle.
 
 ```mermaid

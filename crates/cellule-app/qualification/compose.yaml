@@ -49,7 +49,7 @@ services:
       - ${CELLULE_REFERENCE_STATE:?set an external state directory}/source:/source:ro
       - ${CELLULE_REFERENCE_STATE:?set an external state directory}/target-linux:/target
       - cargo-home:/cargo-home
-    command: [cargo, test, --release, --locked, -p, cellule-app, --test, reference_application, --no-run]
+    command: [cargo, test, --release, --locked, -p, cellule-app, --test, integration, --no-run]
     cpus: 2.0
     mem_limit: 4g
     memswap_limit: 4g

@@ -6,7 +6,7 @@ Cell ownership belong to `cellule-runtime`.
 
 ```mermaid
 flowchart LR
-    Product[Embedding service] --> Provider[Explicit provider]
+    Product[Application] --> Provider[Explicit provider]
     Provider --> Store[Store]
     Store --> Object[Object store]
     Runtime[Cell authority] -. chooses root .-> Object

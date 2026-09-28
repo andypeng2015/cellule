@@ -1,13 +1,13 @@
 # Provider setup and scope
 
-The embedding service owns credentials, endpoint choice, and authorization.
-`build_explicit_store` constructs a provider when the service opts into
+The application owns credentials, endpoint choice, and authorization.
+`build_explicit_store` constructs a provider when the application opts into
 Cellule's builder. `probe_storage` checks the conditional-write and ranged-read
 capabilities needed before serving a Cell.
 
 | Boundary | Owner |
 | --- | --- |
-| Credentials and endpoint | Embedding service. |
+| Credentials and endpoint | Application. |
 | Provider-neutral transport | `cellule-store`. |
 | Object layout and verified root | `cellule-ltx`. |
 | Owner/head CAS and response gate | `cellule-runtime`. |
