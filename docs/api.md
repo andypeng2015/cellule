@@ -1,7 +1,7 @@
 # Cellule API guide
 
 This guide follows the public Rust API an application uses to declare Cells and
-invoke them. Start with the [README examples](../README.md#run-your-first-cell)
+invoke them. Start with the [README examples](../README.md#start-locally)
 if you have not run a Cell yet. The executable
 [orders example](../crates/cellule-app/examples/orders.rs) shows the full path,
 including catalog provisioning and a local runtime.
@@ -14,10 +14,10 @@ including catalog provisioning and a local runtime.
 | Select a Cell and call typed operations | [`ApplicationHandle`, `cell_client!`](../crates/cellule-app/src/lib.rs) | Application author |
 | Use SQL, KV, Blob, Queue, Cron, or Workflow | [Typed primitive capabilities](#primitive-capabilities) | Application author |
 | Implement a custom operation | [`CellModule`, `Command`, `Query`, `WireValue`](../crates/cellule-runtime/docs/rust-api.md) | Module author |
-| Start and drain a serving node | [`CellNodeBuilder`, `CellNode`](../crates/cellule-host/README.md) | Embedding service |
-| Supply storage, credentials, or HTTP | [Embedding guide](embedding.md) | Embedding service |
+| Start and drain a serving node | [`CellNodeBuilder`, `CellNode`](../crates/cellule-host/README.md) | Service |
+| Supply storage, credentials, or HTTP | [Framework integration guide](framework.md) | Service |
 
-Cellule does not turn a primitive into a public endpoint. The embedding service
+Cellule does not turn a primitive into a public endpoint. The service
 still authenticates requests, chooses tenant and application identities, and
 controls providers and network policy.
 
@@ -70,6 +70,23 @@ shows a complete `CellModule` and `ApplicationBuilder::finish`. Its
 `BuildDescriptor` records a source revision and Cargo lock digest. For the
 trait-based path, use `CellApplication::compile(build)`.
 
+### What a module descriptor freezes
+
+| Declaration | Why it matters |
+| --- | --- |
+| `NamespaceDescriptor` | Stable namespace ID, role, shard count, effect targets, and optional dead-letter relationship. |
+| `MigrationDescriptor` | Ordered schema version, SQL bytes, and digest used during bootstrap and recovery. |
+| `OperationDescriptor` | Numeric command/query ID, codec version, schema interval, and input/output bounds. |
+| Source and lockfile digests | Bind the compiled registry to the application build evidence. |
+
+`CellModule::register` binds the functions named by that descriptor. The
+registry rejects missing or extra bindings. A custom `Command` executes in one
+Cell transaction through `CommandContext`; a `Query` receives a read-only
+`QueryContext`. Their `WireValue` inputs and outputs use bounded codecs. See
+[native Rust authoring](../crates/cellule-runtime/docs/rust-api.md) and the
+[orders module](../crates/cellule-app/examples/orders.rs) for the concrete
+registration code.
+
 ## 2. Bind a client and select a Cell
 
 Once a service has provisioned a catalog entry, established an owner, and
@@ -88,7 +105,17 @@ not match the compiled artifact. Its calls also reject targets outside the
 bound tenant, application, namespace, or declared partition scheme.
 
 Use `target_for_scope(namespace, scope)` to derive a target from the declared
-fixed-shard or entity scheme. If you want named, compile-time checked accessors,
+fixed-shard or entity scheme. The local orders example selects its sole fixed
+shard explicitly:
+
+```rust
+let target = CellTarget::new(tenant, application_id, ORDERS, &partition_for_shard(0))?;
+```
+
+A target carries tenant, application, namespace, and partition identity. Its
+Cell ID is stable across owner changes. Receipts refer to a specific Cell and
+incarnation; do not use one Cell's receipt as a minimum for another Cell.
+If you want named, compile-time checked accessors,
 implement `CellKey::canonical_bytes` and declare them with `cell_client!`.
 The macro checks its namespace, module, and operation IDs against the compiled
 registry before accepting a handle; see the
@@ -168,6 +195,38 @@ See the [primitive guide](../crates/cellule-runtime/docs/primitives.md) for
 behavior and the [application integration suite](../crates/cellule-app/tests/integration.rs)
 for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
 
+### Typical operation sequences
+
+- **SQL:** get `SqlCell<M>` for an explicit target, call `batch` with a fresh
+  mutation identity, then call `query(Some(committed.receipt), ...)`. The
+  [orders example](../crates/cellule-app/examples/orders.rs) checks the
+  returned row and drains the runtime.
+- **KV:** use one scope in `KvAtomicRequest` to combine checks and mutations,
+  then `get` or `list` on its derived shard. A returned version can be used in
+  the next conditional request.
+- **Blob:** `Begin`, `PutPart`, then `Complete` with separate mutation
+  identities; read the object at the completion receipt. The
+  [attachments example](../crates/cellule-app/examples/attachments.rs) also
+  verifies the bytes and content type.
+- **Queue:** `send` with a producer identity, `claim` from a chosen shard,
+  validate that exact claim on the owner, then `ack`, `retry`, or `extend`
+  using its message ID and token. Delivery is at least once.
+- **Cron:** `mutate` a schedule, inspect it with `get`, and let the installed
+  maintenance runner perform due ticks. A schedule declaration does not by
+  itself start a service scheduler.
+- **Workflow and Activities:** `start` or `signal` a workflow, read `state`,
+  and run the explicitly installed `ActivitySupervisor` for external work.
+  The supervisor checks leases and records completions through the Cell.
+- **Effects:** a command emits a source intent through
+  `CommandContext::emit_effect`. An explicitly installed supervisor claims,
+  validates, and acknowledges source effects; the destination must apply them
+  idempotently. No cross-Cell SQL transaction is implied.
+
+The [primitive integration scenario](../crates/cellule-app/tests/primitives.rs)
+runs all of these paths, removes the original SQLite files, restores from
+published roots under a successor owner, and reads and writes again. It uses
+an in-memory object store, so its success is local recovery evidence.
+
 ## Serving-node boundary
 
 `cellule-host` composes one runtime and its facilities. A service starts with
@@ -175,10 +234,10 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
 and session, installs the required lease and owned components, then calls
 `CellNode::start()`. Shutdown must drain accepted work and release the node
 session. `build_unleased_for_maintenance()` is an offline maintenance path,
-not a serving-node shortcut. Follow the [embedding](embedding.md) and
+not a serving-node shortcut. Follow the [framework integration](framework.md) and
 [host lifecycle](../crates/cellule-host/docs/lifecycle.md) guides for the
 complete startup and drain sequence. Provider credentials, HTTP handlers,
-authorization, and deployment policy remain in the embedding service.
+authorization, and deployment policy remain in the service.
 
 For exact type signatures and trait bounds, build the crate API documentation:
 

@@ -21,7 +21,7 @@ flowchart TD
 | SQL and distributed primitives | [Primitives](primitives.md) | [Procedures, limits, and examples](primitives-detailed.md) |
 | Follower durability and owner loss | [Failover](failover-and-followers.md) | [Node logs, proof, and recovery](failover-and-followers-detailed.md) |
 | Native authoring | [Rust API](rust-api.md) | [Registration, codecs, contexts, and activities](rust-api-detailed.md) |
-| Service integration | [Embedding](deployment.md) | [Fleet, release, drain, and operations](deployment-detailed.md) |
+| Service integration | [Deployment](deployment.md) | [Fleet, release, drain, and operations](deployment-detailed.md) |
 | Test and evidence levels | [Qualification](delivery.md) | [Proof matrix and receipts](delivery-detailed.md) |
 
 The detailed references retain the framework mechanics and examples from the
