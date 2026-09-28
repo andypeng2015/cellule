@@ -18,16 +18,16 @@ common_args=(
   --warmup "$warmup"
 )
 
-crab_report=$(mktemp)
+cellule_report=$(mktemp)
 celld_report=$(mktemp)
-trap 'rm -f "$crab_report" "$celld_report"' EXIT
+trap 'rm -f "$cellule_report" "$celld_report"' EXIT
 
 CARGO_TARGET_DIR="$target_dir/cellule" cargo run --quiet --release \
-  --manifest-path "$script_dir/cellule/Cargo.toml" -- "${common_args[@]}" >"$crab_report"
+  --manifest-path "$script_dir/cellule/Cargo.toml" -- "${common_args[@]}" >"$cellule_report"
 CARGO_TARGET_DIR="$target_dir/celld" cargo run --quiet --release \
   --manifest-path "$script_dir/celld/Cargo.toml" -- "${common_args[@]}" >"$celld_report"
 
 printf '%s\n' "=== cellule-ltx ==="
-cat "$crab_report"
+cat "$cellule_report"
 printf '%s\n' "=== celld-ltx ==="
 cat "$celld_report"

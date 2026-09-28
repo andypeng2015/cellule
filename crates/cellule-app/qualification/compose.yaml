@@ -6,7 +6,7 @@ x-storage: &storage
   AWS_DEFAULT_REGION: us-east-1
 x-environment: &environment
   <<: *storage
-  CELLULE_TEST_BUCKET: crab-reference-app
+  CELLULE_TEST_BUCKET: cellule-reference-app
   CELLULE_TEST_ENDPOINT: http://rustfs:9000
   CELLULE_PERF_PROCESS_ROOT: reference-compose
   CELLULE_PERF_PROCESS_SYNC: /evidence/control
@@ -74,7 +74,7 @@ services:
   bucket-init:
     image: public.ecr.aws/aws-cli/aws-cli:2.27.41@sha256:1c2d7a51b1ff4f460bc3f1e1ee46a6cef47c7429ad9089ef99012a95e472a1a5
     environment: *storage
-    command: [--endpoint-url, http://rustfs:9000, s3api, create-bucket, --bucket, crab-reference-app]
+    command: [--endpoint-url, http://rustfs:9000, s3api, create-bucket, --bucket, cellule-reference-app]
     depends_on:
       rustfs:
         condition: service_healthy

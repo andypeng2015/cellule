@@ -28,19 +28,18 @@ Verification routes:
 | Local LTX | `cargo test -p cellule-ltx --no-default-features --locked` |
 | Lints | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
 | API docs | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked` |
-| Boundaries/layout | `python3 scripts/check-boundaries.py` and `python3 scripts/check-cell-ltx-layout.py` |
-| Document syntax | `python3 scripts/check-doc-rust-fences.py` |
+| Boundaries/layout | `python3 scripts/check-boundaries.py` and `python3 scripts/check-module-layout.py` |
+| Document syntax and links | `python3 scripts/check-doc-rust-fences.py` and `python3 scripts/check-doc-links.py` |
 | SQL/peer contracts | `node crates/cellule-runtime/docs/validate.mjs` |
-| Crab parity | `python3 scripts/check-crab-sync.py --crab-source /path/to/Crab` |
 
 Never weaken qualification profiles or expected evidence to silence a failure.
 Use CI or an isolated verification snapshot for broad suites and process tests.
-Cloud and fault tests require their documented environment. On Crab workstations,
+Cloud and fault tests require their documented environment. On workstations with the mounted Workspace volume,
 set `CARGO_TARGET_DIR` beneath the mounted `$HOME/Workspace/crabbuild-target`,
 with one directory per checkout.
 
 Keep the main documentation scannable: short explanations, contract tables,
 diagrams, and valid Rust examples. The packaged application guide has a doctest;
-all Rust fences pass the syntax gate. Keep intentional source adaptations in
-`scripts/crab-adaptations.patch` small and reviewable; never regenerate it to
-hide unexplained drift.
+all Rust fences pass the syntax gate. Cellule is the authoritative implementation for Cell framework changes.
+Keep module entries, focused production submodules, and their unit tests in the
+same directory; use integration suites for public behavior.

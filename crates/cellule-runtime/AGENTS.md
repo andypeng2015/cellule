@@ -1,106 +1,46 @@
-# cellule-runtime
+# cellule-runtime contributor guide
 
-Root `AGENTS.md` and `docs/README.md` apply.
+Root `AGENTS.md` applies. Cellule owns this implementation and its contracts.
+Read [the runtime guide](docs/README.md) before changing behavior.
 
-## Purpose and ownership
+## Boundary
 
-Embedded SQLite Cell runtime: identities, control/CAS authority, the single-Cell
-actor and executor, schema installation, publication, follower durability,
-fleet placement, and qualification receipts. HTTP, authentication, provider
-construction, and product policy stay in the embedding service.
-
-## Read first
-
-1. `src/lib.rs` — module declarations and the frozen root prelude.
-2. `src/cell/actor.rs` — the actor root. `actor/task.rs` and
-   `actor/requests.rs` drive the loop and the request paths, `actor/tasks.rs`
-   and `actor/lifecycle.rs` handle finished tasks and cell scheduling,
-   `actor/{handle,state,runtime}.rs` own the handle, projections, and runtime
-   administration, and `actor/admission.rs` fences all of them.
-3. `src/cell/executor.rs` and `src/cell/worker.rs` with `src/cell/worker/run.rs`
-   — command execution and the bounded SQL worker pool.
-4. `src/publication.rs` and `src/recovery/manifest.rs` — exact-root publication
-   and recovery artifacts.
-5. `src/coordination.rs` — the pure `pub(crate)` coordination kernel, with the
-   deterministic simulator in `src/coordination/sim.rs`.
-6. `docs/runtime.md` and `docs/delivery.md` — request path and evidence map.
+- Own Cell identity, authority CAS, actor and SQL execution, request outcomes,
+  follower durability, placement, primitives, and qualification mechanics.
+- Leave HTTP ingress, product authorization, credentials, and provider
+  construction with the embedding service.
+- Keep one canonical response gate: a successful command has an exact published
+  root or recoverable follower proof.
 
 ## Module map
 
-Subsystem roots keep the shared contract and helpers; the named child modules
-own one concern each. Module files sit beside their root (`foo.rs` + `foo/`).
-
-- Cell: `cell/{actor.rs,catalog.rs,application.rs,executor.rs,schema.rs,worker.rs}`,
-  `cell/actor/{admission,handle,lifecycle,requests,runtime,state,task,tasks}.rs`,
-  `cell/worker/run.rs`.
-- Control and clients: `control.rs` + `control/authority.rs`, `client.rs`,
-  `peer.rs` + `peer/{dispatch,protobuf,transport}.rs`.
-- Durability and followers: `follower.rs` + `follower/records.rs`,
-  `node/{advertisement,capacity,durability,lease,log,log_shipper,log_state,log_transport}.rs`,
-  `node/directory.rs` + `node/directory/{advertisement,log,recovery}.rs`,
-  `node/log_recovery.rs` + `node/log_recovery/witness.rs`.
-- Fleet and recovery: `fleet/{scheduler,placement,pressure,eviction,resource,telemetry}.rs`,
-  `recovery/{manifest,release,release_progress,artifacts}.rs`,
-  `recovery/backup/restore.rs`, `recovery/retention.rs`.
-- Primitives: `primitives/<name>.rs` with the wire codecs in
-  `primitives/<name>/api.rs`; Effects adds `supervisor.rs` and Workflow adds
-  `activity.rs`, `activity_api.rs`, `activity_codec.rs`, and `maintenance.rs`.
-- Registry and qualification: `registry/{builder,descriptor,handlers,schemas}.rs`,
-  `qualification/{profile,receipt,workload,cluster}.rs`,
-  `qualification/receipt/{matrix,runner}.rs`, `qualification/tests/`.
-
-## Common changes
-
-| Task | Start here | Also inspect |
+| Concern | Start at | Adjacent tests |
 | --- | --- | --- |
-| Add a primitive operation | `src/primitives/<name>.rs` | `src/registry/schemas.rs`, `tests/primitives/` |
-| Add primitive maintenance | `src/fleet/scheduler.rs` | that primitive's `TABLE` constant, `tests/runtime/scheduler.rs` |
-| Wire or defer a policy seam | `src/cell/actor.rs` | the embedding service’s policy wiring |
-| Change admission or lifecycle | `src/cell/actor/admission.rs`, `src/cell/actor/lifecycle.rs` | `src/coordination.rs`, `tests/runtime/lifecycle.rs` |
-| Change publication | `src/publication.rs` | `src/recovery/`, `tests/runtime/publication.rs` |
-| Change node log or durability | `src/node/` | `src/follower.rs`, `tests/fleet/` |
-| Change placement or pressure | `src/fleet/` | `tests/fleet/`, `docs/canonical-ltx-scaling.md` |
-| Change pressure sampling or shedding | `src/cell/actor/task.rs` | `src/cell/actor/runtime.rs`, `src/fleet/pressure.rs`, `src/fleet/telemetry.rs`, `tests/fleet/pressure.rs` |
+| Actor and worker | `src/cell/actor/mod.rs`, `src/cell/worker/mod.rs` | `src/cell/actor/tests.rs`, `src/cell/worker/tests/mod.rs` |
+| Client routing | `src/client/mod.rs` | `src/client/tests/mod.rs` |
+| Authority and publication | `src/control/mod.rs`, `src/publication/mod.rs` | Their `tests.rs` siblings. |
+| Node and follower log | `src/node/mod.rs`, `src/follower/mod.rs` | Co-located unit tests and `tests/fleet.rs`. |
+| Primitives and registry | `src/primitives/mod.rs`, `src/registry/mod.rs` | `tests/primitives.rs`, `tests/contracts.rs`. |
+| Recovery and fleet | `src/recovery/mod.rs`, `src/fleet/mod.rs` | `tests/runtime.rs`, `tests/fleet.rs`. |
+| Qualification | `src/qualification/mod.rs` | `tests/qualification.rs`. |
+| Pure coordination | `src/coordination/mod.rs` | `src/coordination/tests/mod.rs` and `model/`. |
 
-## Layout and tests
-
-- `src/` is production code. Integration tests live in `tests/` as one binary
-  per suite: `runtime`, `primitives`, `protocol`, `contracts`, `fleet`,
-  `qualification`. Suite modules live in the matching directory.
-- `tests/support/` holds the shared harness; suites declare `mod support;` and
-  refer to `crate::support::…`. Never add a `#[path]` attribute.
-- Tests that assert crate-private behavior stay in their module and are listed
-  in `tests-allow-list.txt` with a reason. New in-src tests must be added there;
-  prefer moving the behavior behind the public API when that is honest.
-  Each entry must name a file that still holds tests or test modules, so a moved
-  or emptied test location cannot leave a stale entry behind.
-- `api-prelude.txt` is the frozen root surface. Adding a root re-export means
-  editing both `src/lib.rs` and that file in the same commit.
-- Run `python3 scripts/check-cell-ltx-layout.py` after layout changes.
+A module with children uses `module/mod.rs`; focused production and unit-test
+files sit beside it. Integration suites test the public path under `tests/`.
+No `#[path]` indirection. `scripts/check-module-layout.py` catches orphaned
+modules. The root API inventory is `api-prelude.txt`.
 
 ## Invariants
 
-- One fenced writer per Cell; a successful response follows durable publication
-  or a durable follower proof (`src/cell/actor.rs`, `src/publication.rs`).
-- Recovery verifies the authority-pinned root and every referenced object
-  (`src/recovery/manifest.rs`).
-- Staged xorbs flush before any bundle publication.
-- Every acquired lock is released on success, error, cancellation, and timeout.
-- A node sheds settled Cells only on sustained evidence: the actor samples its own
-  reservation ledger on its tick, the classifier hands a tier to the bounded
-  eviction path only after a full dwell window above the enter threshold, and
-  that tier is what the node reports through
-  `CellTelemetry::pressure_state` (`src/cell/actor/task.rs`,
-  `src/fleet/pressure.rs`).
-- `src/coordination.rs` stays sans-I/O: no `async`, no clock, no storage
-  (`scripts/check-cell-ltx-layout.py` enforces it).
-
-## Features and platform
-
-- `test-support` enables `src/test_support.rs` and the `cell_movement_probe`
-  binary. Integration suites that need the process fixture run with
-  `--features test-support`.
-- `cellule-ltx` is always consumed with its `replica` feature from this crate.
+- One fenced writer per Cell. Stale owners lose admission before further SQL.
+- Outcome and mutation commit together; response waits for durable proof.
+- Exact recovery verifies the authority-pinned root and every dependency.
+- Staged objects flush before bundle publication; locks and admissions release
+  on success, error, cancellation, and timeout.
+- Pressure shedding requires a full dwell window; a sampled tier drives bounded
+  eviction and reported telemetry.
+- The coordination kernel has no I/O, clock, or async. Gather observations in
+  adapters, decide in the kernel, then act.
 
 ## Verification
 
@@ -109,14 +49,10 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
   cargo test -p cellule-runtime --features test-support --locked
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
   cargo clippy -p cellule-runtime --all-targets --features test-support --locked -- -D warnings
-python3 scripts/check-cell-ltx-layout.py
+python3 scripts/check-module-layout.py
+python3 scripts/check-boundaries.py
 ```
 
-Use a target directory unique to the checkout; never share it between
-worktrees. Protected qualification receipts come from the workflows under
-the embedding service’s protected workflows, not from local runs.
-
-## Related documentation
-
-`docs/README.md`, `docs/runtime.md`, `docs/delivery.md`,
-`docs/canonical-ltx-scaling.md`, `qualification/README.md`.
+Use a target directory unique to the checkout. Provider and process
+qualification requires separate controlled environments; see
+[delivery](docs/delivery.md) and [the qualification harness](qualification/README.md).

@@ -79,7 +79,7 @@ assert(!/^\s*service\s/m.test(peer), 'private contract must not generate a publi
 assert(!/\b(?:WorkflowDecision|WorkflowAction)\b/.test(peer), 'native decisions do not cross peer RPC');
 assertions += 2;
 
-const scratch = mkdtempSync(path.join(tmpdir(), 'crab-cell-contracts-'));
+const scratch = mkdtempSync(path.join(tmpdir(), 'cellule-contracts-'));
 try {
   const compile = spawnSync('protoc', [
     `--proto_path=${contracts}`,

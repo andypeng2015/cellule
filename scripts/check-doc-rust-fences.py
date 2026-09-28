@@ -25,6 +25,8 @@ CRATES = (
     "crates/cellule-host",
     "crates/cellule-ltx",
     "crates/cellule-peer-http",
+    "crates/cellule-store",
+    "crates/cellule-types",
     "docs",
 )
 

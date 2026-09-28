@@ -18,12 +18,13 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
 python3 scripts/check-boundaries.py
-python3 scripts/check-cell-ltx-layout.py
+python3 scripts/check-module-layout.py
 python3 scripts/check-doc-rust-fences.py
+python3 scripts/check-doc-links.py
 node crates/cellule-runtime/docs/validate.mjs
 ```
 
-On Crab workstations, always set `CARGO_TARGET_DIR` beneath the mounted
+On workstations with the mounted Workspace volume, always set `CARGO_TARGET_DIR` beneath the mounted
 `$HOME/Workspace/crabbuild-target`, with a unique directory per checkout. Use CI
 or a dedicated verification snapshot for broad suites and process tests. The [reference application smoke](docs/quickstart.md#run-the-reference-application) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
 

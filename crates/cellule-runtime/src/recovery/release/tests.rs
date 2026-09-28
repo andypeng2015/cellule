@@ -16,7 +16,7 @@ fn fixture() -> (ReleaseStore, Vec<u8>, Digest) {
         Path::from("root"),
         *identity.application().as_bytes(),
     );
-    let descriptor = br#"{"runtime":"crab-http-server","version":1}"#.to_vec();
+    let descriptor = br#"{"runtime":"cellule","version":1}"#.to_vec();
     let digest = Digest::from_bytes(*blake3::hash(&descriptor).as_bytes());
     (
         ReleaseStore::new(layout, identity).unwrap(),

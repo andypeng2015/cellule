@@ -7,8 +7,7 @@ set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
 
 ## Before the first release
 
-1. Confirm the crates.io names are still free (they were unclaimed when this
-   page was written):
+1. Check the registry for existing names and versions:
 
    ```sh
    for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host cellule-peer-http; do
@@ -27,8 +26,9 @@ set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
    python3 scripts/check-boundaries.py
-   python3 scripts/check-cell-ltx-layout.py
+   python3 scripts/check-module-layout.py
    python3 scripts/check-doc-rust-fences.py
+   python3 scripts/check-doc-links.py
    node crates/cellule-runtime/docs/validate.mjs
    ```
 
@@ -61,9 +61,9 @@ token; nothing in this repository uploads on its own.
 ## After publishing
 
 - Tag the release and record the exact revisions in the release notes.
-- Switch Crab from its in-tree `crab-cell-*` crates to the published
-  `cellule-*` dependencies. From that point Cellule is the upstream, and
-  `docs/synthesis.md` is historical.
+- Embedding services can adopt the published `cellule-*` dependencies. Cellule
+  remains the source of truth for their contracts; `docs/synthesis.md` is
+  historical.
 - Keep the bundled attributions with the published crates: `cellule-ltx`
   ships `LICENSE` and `LICENSE.pierrec-lz4`, and its `UPSTREAM.md` must keep
   naming the Celld, rustyriver, Litestream, and LTX sources.

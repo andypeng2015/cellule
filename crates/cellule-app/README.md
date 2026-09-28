@@ -1,22 +1,24 @@
 # cellule-app
 
-Compile native Rust modules into one deterministic application descriptor.
-Use typed handles or generated clients to address Cells and invoke registered
-commands and queries. The host owns runtime lifecycle and transport wiring.
+Declare a stable Cell topology, compile native Rust modules, and expose typed
+application handles. The host owns runtime lifecycle and network wiring.
 
 ```mermaid
 flowchart LR
     Modules[Native modules] --> Builder[ApplicationBuilder]
-    Topology[Stable topology] --> Builder
-    Builder --> Compiled[CompiledApplication]
-    Compiled --> Host[CellNode]
-    Compiled --> Handle[ApplicationHandle]
-    Handle --> Client[Generated typed client]
+    Topology[Cell types] --> Builder
+    Builder --> Descriptor[CompiledApplication]
+    Descriptor --> Host[CellNode]
+    Descriptor --> Handle[ApplicationHandle]
 ```
 
-## Declare a topology
+| Guide | Topic |
+| --- | --- |
+| [Topology](docs/topology.md) | Stable IDs, shards, entity partitions, and descriptors. |
+| [Invocations](docs/invocation.md) | Typed clients, read policy, and receipts. |
+| [Examples and tests](docs/examples.md) | Runnable paths and proof levels. |
 
-This complete example is compiled by `cargo test -p cellule-app --doc`.
+This complete declaration is compiled as a crate doc test:
 
 ```rust
 use cellule_app::CellType;
@@ -36,60 +38,8 @@ fn orders_topology() -> cellule_runtime::Result<CellType> {
 assert!(orders_topology().is_ok());
 ```
 
-For module descriptors and registration, run the [authoring example](examples/authoring.rs).
-For a real command and receipt-bound read, run the [orders example](examples/orders.rs).
-
 ```sh
 cargo run -p cellule-app --example authoring --locked
 cargo run -p cellule-app --example orders --locked
-```
-
-## Identity and routing contracts
-
-| Surface | Contract |
-| --- | --- |
-| `ApplicationHandle::new` | Checks the application name and client registry digest before calls start. |
-| `cell_client!` | Binds explicit stable namespace/operation IDs and the declared `CellKey` type. |
-| Fixed shards | `CellType::new` declares a bounded shard count. |
-| Entity Cells | `with_entity_partitions` requires one declared shard; typed keys derive canonical 33-byte partitions. |
-| Provisioning | `CellType::entity_partition` uses the same derivation as generated clients. |
-| Explicit SQL/Effects | Accept validated entity targets. |
-| Namespace primitives | KV, Blob, Queue, Cron, Workflow, and Activities require fixed shards. |
-
-Entity topology changes the descriptor. It does not split SQLite state or bypass
-catalog and host admission.
-
-## Read policies
-
-| Operation | Routing and proof |
-| --- | --- |
-| Default query | `ReadPolicy::CurrentOwner` keeps owner ordering. |
-| Explicit replica query | `ReadPolicy::Replica` returns an admitted snapshot's actual receipt. |
-| Minimum receipt | Still checks Cell, incarnation, and sequence. |
-| Missing or lagging reader | Returns `ReplicaUnavailable` or `ReplicaBehind`; no owner fallback. |
-| Commands, resolution, streams, lease validation | Always retain owner ordering. |
-
-The host wires `CellClient::with_read_replicas`, `ReplicaReadRouter`, and an
-authenticated `ReplicaPeerClient`. Selection and retries share one five-second
-deadline. Authors receive typed capabilities, not storage or transport handles.
-
-## Verification map
-
-| Suite | Evidence |
-| --- | --- |
-| `tests/contracts.rs` | Descriptor, digest, and identity contracts. |
-| `tests/reference_application/primitives.rs` | Typed primitive writes, read-back, and exact-root owner recovery. |
-| `tests/reference_application/public_host.rs` | Signed peers, duplicate results, and owner loss. |
-| `tests/reference_application/public_host/replicas.rs` | Reader recruitment, refresh, and cancellation during drain. |
-| `tests/reference_application/public_host/rollout.rs` | Additive release with retained code and recovered receipts. |
-| `tests/reference_application/entities.rs` | Generated entity routing and isolated request ledgers. |
-| `tests/reference_application/process_performance.rs` | Separate-process fleet workload; ignored unless explicitly selected. |
-
-```sh
 cargo test -p cellule-app --locked
 ```
-
-The public-host fixtures share a process. RustFS, constrained containers, and
-continuous-traffic rollout require the separate qualification environment.
-See [PERFORMANCE.md](PERFORMANCE.md), [AGENTS.md](AGENTS.md), and the
-[framework quickstart](../../docs/quickstart.md).
