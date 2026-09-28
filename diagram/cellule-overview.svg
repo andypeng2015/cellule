@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 480" role="img" aria-labelledby="title desc">
+  <title id="title">Cellule component boundaries</title>
+  <desc id="desc">The application owns ingress, authentication, and credentials. Cellule app defines typed modules; host manages lifecycle; runtime owns a fenced Cell writer and coordinates SQLite, LTX, object storage, and authority.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#25334b" stroke-width=".6"/></pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#8ea2bb"/></marker>
+    <style>
+      text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+      .title{font-size:19px;font-weight:700;fill:#f8fafc}.sub{font-size:11px;fill:#a8b8cc}
+      .label{font-size:13px;font-weight:700;fill:#f8fafc}.detail{font-size:10px;fill:#c0ccdb}
+      .edge{fill:none;stroke:#8ea2bb;stroke-width:2;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1080" height="480" rx="18" fill="#0f172a"/><rect width="1080" height="480" rx="18" fill="url(#grid)"/>
+  <text x="30" y="40" class="title">Who owns what?</text>
+  <text x="30" y="61" class="sub">The framework supplies Cell mechanics; your application supplies product policy and infrastructure.</text>
+  <rect x="26" y="94" width="210" height="310" rx="14" fill="#102a38" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="42" y="120" fill="#67e8f9" font-size="11" font-weight="700">YOUR APPLICATION</text>
+  <text x="42" y="158" class="label">Ingress + auth</text><text x="42" y="177" class="detail">HTTP, routing, authorization</text>
+  <text x="42" y="223" class="label">Infrastructure</text><text x="42" y="242" class="detail">credentials, providers, deploy</text>
+  <text x="42" y="288" class="label">Domain model</text><text x="42" y="307" class="detail">modules, schema, operations</text>
+  <rect x="268" y="112" width="210" height="88" rx="10" fill="#123b36" stroke="#34d399" stroke-width="1.5"/>
+  <text x="284" y="142" class="label">cellule-app</text><text x="284" y="164" class="detail">descriptor + typed handles</text>
+  <rect x="268" y="259" width="210" height="88" rx="10" fill="#123b36" stroke="#34d399" stroke-width="1.5"/>
+  <text x="284" y="289" class="label">cellule-host</text><text x="284" y="311" class="detail">start, drain, shutdown</text>
+  <rect x="510" y="160" width="230" height="142" rx="12" fill="#18354b" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="526" y="193" class="label">cellule-runtime</text>
+  <text x="526" y="217" class="detail">one fenced writer per Cell</text>
+  <text x="526" y="237" class="detail">durable request outcomes</text>
+  <text x="526" y="257" class="detail">publication + recovery</text>
+  <rect x="776" y="97" width="270" height="68" rx="9" fill="#382e50" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="792" y="125" class="label">Managed SQLite</text><text x="792" y="146" class="detail">Cell state + outcome in one transaction</text>
+  <rect x="776" y="192" width="270" height="68" rx="9" fill="#382e50" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="792" y="220" class="label">LTX + object store</text><text x="792" y="241" class="detail">immutable, verified recovery bytes</text>
+  <rect x="776" y="287" width="270" height="68" rx="9" fill="#4a351e" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="792" y="315" class="label">Authority CAS</text><text x="792" y="336" class="detail">owner fence + pinned root</text>
+  <path class="edge" d="M236 156H268"/><path class="edge" d="M236 303H268"/>
+  <path class="edge" d="M478 156H494V198H510"/><path class="edge" d="M478 303H494V265H510"/>
+  <path class="edge" d="M740 190H756V131H776"/><path class="edge" d="M740 231H776"/><path class="edge" d="M740 272H756V321H776"/>
+  <text x="30" y="445" class="sub">Optional peer transport uses runtime contracts; the application still owns its endpoints and authorization.</text>
+</svg>
