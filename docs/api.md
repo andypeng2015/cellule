@@ -3,7 +3,7 @@
 This guide follows the public Rust API an application uses to declare Cells and
 invoke them. Start with the [README examples](../README.md#start-locally)
 if you have not run a Cell yet. The executable
-[orders example](../crates/cellule-app/examples/orders.rs) shows the full path,
+[SQL example](../crates/cellule-app/examples/sql.rs) shows the full path,
 including catalog provisioning and a local runtime.
 
 ## Choose an entry point
@@ -65,10 +65,11 @@ Changing them can change routing or persisted identity. Read the
 [topology guide](../crates/cellule-app/docs/topology.md) before changing a
 released descriptor.
 
-The [application descriptor example](../crates/cellule-app/examples/application_descriptor.rs)
-shows a complete `CellModule` and `ApplicationBuilder::finish`. Its
-`BuildDescriptor` records a source revision and Cargo lock digest. For the
-trait-based path, use `CellApplication::compile(build)`.
+The [basic example](../crates/cellule-app/examples/basic.rs) declares KV and
+Queue modules, compiles them through `CellApplication::compile(build)`, and
+uses both through typed handles. Its `BuildDescriptor` records a source
+revision and Cargo lock digest. The separate
+[SQL example](../crates/cellule-app/examples/sql.rs) shows a SQL module.
 
 ### What a module descriptor freezes
 
@@ -84,7 +85,7 @@ registry rejects missing or extra bindings. A custom `Command` executes in one
 Cell transaction through `CommandContext`; a `Query` receives a read-only
 `QueryContext`. Their `WireValue` inputs and outputs use bounded codecs. See
 [native Rust authoring](../crates/cellule-runtime/docs/rust-api.md) and the
-[orders module](../crates/cellule-app/examples/orders.rs) for the concrete
+[SQL module](../crates/cellule-app/examples/sql.rs) for the concrete
 registration code.
 
 ## 2. Bind a client and select a Cell
@@ -92,7 +93,7 @@ registration code.
 Once a service has provisioned a catalog entry, established an owner, and
 started a `CellClient`, bind that client to the compiled application and the
 service-selected tenant and application IDs. These lines come from the
-[runnable orders example](../crates/cellule-app/examples/orders.rs):
+[runnable SQL example](../crates/cellule-app/examples/sql.rs):
 
 ```rust
 let client = CellClient::local(registry, handle);
@@ -105,7 +106,7 @@ not match the compiled artifact. Its calls also reject targets outside the
 bound tenant, application, namespace, or declared partition scheme.
 
 Use `target_for_scope(namespace, scope)` to derive a target from the declared
-fixed-shard or entity scheme. The local orders example selects its sole fixed
+fixed-shard or entity scheme. The local SQL example selects its sole fixed
 shard explicitly:
 
 ```rust
@@ -134,7 +135,7 @@ example. Key bytes must remain stable across compatible releases.
 A `MutationIdentity` contains `request_id`, `issued_at_ms`, and
 `expires_at_ms`. Give each logical command a fresh request ID, then keep that
 identity unchanged if the same command must be retried or resolved. The
-[orders example](../crates/cellule-app/examples/orders.rs) passes
+[SQL example](../crates/cellule-app/examples/sql.rs) passes
 `Some(committed.receipt)` to `SqlCell::query`, so the read must observe the
 published write. A `Receipt` identifies a Cell, owner incarnation, and commit
 sequence; a query returns its actual observation position.
@@ -187,7 +188,7 @@ SQL and source effects select an explicit target.
 | `effects::<M>(target)` | `EffectSource<M>` | `claim`, `validate`, `status`, `ack`, `retry` on a source Cell |
 
 Blob handles require `with_blob_artifact_store` on the application handle;
-the [attachments example](../crates/cellule-app/examples/attachments.rs) shows
+the [Blob example](../crates/cellule-app/examples/blob.rs) shows
 the complete upload and receipt-bound read. Queue and effect lease validation
 use the current owner even when ordinary queries use a replica. Activities and
 effects need explicit supervisors; the application controls their lifecycle.
@@ -199,28 +200,33 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
 
 - **SQL:** get `SqlCell<M>` for an explicit target, call `batch` with a fresh
   mutation identity, then call `query(Some(committed.receipt), ...)`. The
-  [orders example](../crates/cellule-app/examples/orders.rs) checks the
+  [SQL example](../crates/cellule-app/examples/sql.rs) checks the
   returned row and drains the runtime.
 - **KV:** use one scope in `KvAtomicRequest` to combine checks and mutations,
   then `get` or `list` on its derived shard. A returned version can be used in
-  the next conditional request.
+  the next conditional request. The [basic example](../crates/cellule-app/examples/basic.rs)
+  writes a setting and reads at its receipt.
 - **Blob:** `Begin`, `PutPart`, then `Complete` with separate mutation
   identities; read the object at the completion receipt. The
-  [attachments example](../crates/cellule-app/examples/attachments.rs) also
+  [Blob example](../crates/cellule-app/examples/blob.rs) also
   verifies the bytes and content type.
 - **Queue:** `send` with a producer identity, `claim` from a chosen shard,
   validate that exact claim on the owner, then `ack`, `retry`, or `extend`
-  using its message ID and token. Delivery is at least once.
+  using its message ID and token. Delivery is at least once; the
+  [basic example](../crates/cellule-app/examples/basic.rs) demonstrates the lease path.
 - **Cron:** `mutate` a schedule, inspect it with `get`, and let the installed
   maintenance runner perform due ticks. A schedule declaration does not by
-  itself start a service scheduler.
+  itself start a service scheduler. The [schedules example](../crates/cellule-app/examples/schedules.rs)
+  drives one explicit tick and effect delivery cycle.
 - **Workflow and Activities:** `start` or `signal` a workflow, read `state`,
   and run the explicitly installed `ActivitySupervisor` for external work.
-  The supervisor checks leases and records completions through the Cell.
+  The supervisor checks leases and records completions through the Cell. The
+  [workflow example](../crates/cellule-app/examples/workflow.rs) runs this path.
 - **Effects:** a command emits a source intent through
   `CommandContext::emit_effect`. An explicitly installed supervisor claims,
   validates, and acknowledges source effects; the destination must apply them
-  idempotently. No cross-Cell SQL transaction is implied.
+  idempotently. The [schedules example](../crates/cellule-app/examples/schedules.rs)
+  uses a signed local peer loopback. No cross-Cell SQL transaction is implied.
 
 The [primitive integration scenario](../crates/cellule-app/tests/primitives.rs)
 runs all of these paths, removes the original SQLite files, restores from

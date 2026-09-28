@@ -37,13 +37,21 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[example]]
-name = "application_descriptor"
-path = "examples/application_descriptor.rs"
+name = "basic"
+path = "examples/basic.rs"
 
 [[example]]
-name = "orders"
-path = "examples/orders.rs"
+name = "sql"
+path = "examples/sql.rs"
 
 [[example]]
-name = "attachments"
-path = "examples/attachments.rs"
+name = "blob"
+path = "examples/blob.rs"
+
+[[example]]
+name = "workflow"
+path = "examples/workflow.rs"
+
+[[example]]
+name = "schedules"
+path = "examples/schedules.rs"

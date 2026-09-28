@@ -25,5 +25,5 @@ Fixed shards use partition version 1, hashed entity keys use version 2, and
 direct UUID partitions use version 3. These schemes have distinct descriptor
 bytes. UUID keys must be 16 bytes with a recognized version (1 through 8)
 and the RFC variant bits; generated clients route those bytes unchanged.
-The [application descriptor example](../examples/application_descriptor.rs) compiles one descriptor and
-prints its digest.
+The [basic example](../examples/basic.rs) compiles two Cell types, prints the
+descriptor digest, and uses KV and Queue through typed handles.

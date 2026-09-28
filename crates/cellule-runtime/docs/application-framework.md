@@ -45,10 +45,10 @@ distributed relational database.
 
 [Back to the Cell runtime index](README.md)
 
-[`crates/cellule-app/examples/application_descriptor.rs`](../../cellule-app/examples/application_descriptor.rs)
-is the minimal compile-checked version of the flow below: one module with its
-migration, one namespace, one cell type, and a finished `CompiledApplication`.
-The prose snippets stay illustrative; the example is what CI compiles.
+[`crates/cellule-app/examples/basic.rs`](../../cellule-app/examples/basic.rs)
+compiles two modules and Cell types, then exercises KV and Queue through a
+local runtime. The prose snippets stay illustrative; the example is what CI
+compiles and runs.
 
 The [complete Commerce example](application-framework-example.md) remains the
 target qualification shape for custom SQL Cells, KV, Blob, Queue, Cron,

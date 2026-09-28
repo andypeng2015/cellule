@@ -1,4 +1,14 @@
-//! Upload an attachment, then read it at the returned durable receipt.
+//! Upload one multipart Blob, then read it at the completion receipt.
+//!
+//! Run: `cargo run -p cellule-app --example blob --locked`
+//!
+//!   Blob Cell: Begin upload -> PutPart -> Complete
+//!   Object store: staged immutable part -> referenced published Blob
+//!   Application: completion receipt -> receipt-bound Read -> verify bytes
+//!
+//! Each mutation has its own stable request ID. Staging a part does not make
+//! the Blob visible: Complete publishes the reference in the Cell's durable
+//! state. The in-memory store and one small text attachment are local fixtures.
 
 use std::{
     sync::{Arc, OnceLock},
@@ -58,9 +68,7 @@ impl CellModule for Attachments {
         static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: Self::NAME,
-            source_digest: Digest::from_bytes(
-                *blake3::hash(include_bytes!("attachments.rs")).as_bytes(),
-            ),
+            source_digest: Digest::from_bytes(*blake3::hash(include_bytes!("blob.rs")).as_bytes()),
             retained_codes: &[],
             schema_min: 1,
             schema_max: 1,

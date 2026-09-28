@@ -22,7 +22,7 @@ flowchart TD
 Dependencies point down from host and app to runtime, LTX, store, and types.
 The host also uses runtime directly. The optional peer adapter depends on
 runtime contracts; it never becomes an application authorization layer. See the
-[workspace reference](workspace-reference.md) for where each crate lives.
+[workspace reference](reference.md) for where each crate lives.
 
 ## Boundaries
 

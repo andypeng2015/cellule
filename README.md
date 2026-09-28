@@ -20,15 +20,19 @@ Use Rust **1.97 or newer**. From the workspace root, run these local examples;
 they use temporary SQLite files and in-memory object storage:
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
-cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example basic --locked
+cargo run -p cellule-app --example sql --locked
+cargo run -p cellule-app --example blob --locked
+cargo run -p cellule-app --example workflow --locked
+cargo run -p cellule-app --example schedules --locked
 ```
 
-The first command compiles a descriptor without starting a Cell. The others
-print `order 42 total: 1999 cents` and
-`attachment stored: receipt for order 42` after a durable write and a
-receipt-bound read. No cloud credentials are needed. Follow the
+`basic` compiles two Cell types, starts a KV Cell and a Queue Cell, then writes
+and reads a setting and claims and acknowledges a job. `sql` shows SQL;
+`blob` shows Blob; `workflow` runs an Activity; `schedules` fires a Cron
+occurrence and delivers its Effect. Together they exercise all eight
+primitives through durable commands and typed handles. No cloud credentials
+are needed. Follow the
 [step-by-step quickstart](docs/quickstart.md) for expected output and a local
 recovery test.
 
@@ -36,7 +40,7 @@ recovery test.
 
 ## Follow one complete application path
 
-The [runnable orders example](crates/cellule-app/examples/orders.rs) contains
+The [runnable SQL example](crates/cellule-app/examples/sql.rs) contains
 the complete local setup. It declares a SQL module and migration, compiles an
 application, provisions a catalog entry and fenced owner, bootstraps a managed
 Cell, invokes it through a typed handle, checks the observed row, and drains
@@ -161,10 +165,12 @@ from `ApplicationHandle`:
 | **Activities** | External work requested by a workflow. | `activities::<M>()` → `ActivitySupervisor` | Run outside SQLite with explicit supervision and lease checks. |
 | **Effects** | Delivery between Cells. | `effects::<M>(target)` → `claim`, `ack` | Source intent is durable; destination applies idempotently. |
 
-The [attachments example](crates/cellule-app/examples/attachments.rs) is a
-complete Blob write/read path. The
+The [example map](crates/cellule-app/docs/examples.md) explains how each
+runnable path works, including the [Blob upload](crates/cellule-app/examples/blob.rs),
+[Workflow activity](crates/cellule-app/examples/workflow.rs), and
+[Cron effect delivery](crates/cellule-app/examples/schedules.rs). The
 [application integration suite](crates/cellule-app/tests/integration.rs)
-exercises all eight primitives and recovery. Read the [primitive guide](crates/cellule-runtime/docs/primitives.md)
+also exercises all eight primitives and recovery. Read the [primitive guide](crates/cellule-runtime/docs/primitives.md)
 and [API guide](docs/api.md#primitive-capabilities) for method details and
 failure behavior. Cross-Cell work uses effects and inboxes; it is not one
 transaction across Cells.
@@ -190,7 +196,7 @@ lost, resolve the original request ID before retrying. See
 | Choose typed methods and handle outcomes | [API](docs/api.md) |
 | Understand ownership, storage, and recovery | [Architecture](docs/architecture.md) |
 | Embed Cellule in a serving service | [Framework integration](docs/framework.md) |
-| Find the right crate or test | [Workspace reference](docs/workspace-reference.md) |
+| Find the right crate or test | [Workspace reference](docs/reference.md) |
 | Evaluate current support and gaps | [Roadmap](docs/roadmap.md) |
 | Qualify and publish a matched crate set | [Release guide](docs/releasing.md) |
 

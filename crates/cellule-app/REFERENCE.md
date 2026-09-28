@@ -40,14 +40,18 @@ fn orders_topology() -> cellule_runtime::Result<CellType> {
 assert!(orders_topology().is_ok());
 ```
 
-For module descriptors and registration, run the [application descriptor example](examples/application_descriptor.rs).
-For a real command and receipt-bound read, run the [orders example](examples/orders.rs).
-For a multipart Blob write and receipt-bound read, run the [attachments example](examples/attachments.rs).
+For module descriptors, registration, KV, and Queue, run the [basic example](examples/basic.rs).
+For a real command and receipt-bound read, run the [SQL example](examples/sql.rs).
+For a multipart Blob write and receipt-bound read, run the [Blob example](examples/blob.rs).
+For a durable activity, run the [Workflow example](examples/workflow.rs). For a
+scheduled cross-Cell effect, run the [Schedules example](examples/schedules.rs).
 
 ```sh
-cargo run -p cellule-app --example application_descriptor --locked
-cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example basic --locked
+cargo run -p cellule-app --example sql --locked
+cargo run -p cellule-app --example blob --locked
+cargo run -p cellule-app --example workflow --locked
+cargo run -p cellule-app --example schedules --locked
 ```
 
 ## Identity and routing contracts
