@@ -152,7 +152,7 @@ Each node publishes a signed advertisement every three seconds. The record binds
 - Free memory, disk, and job credits
 - Scheduler progress
 
-Advertisements expire after 15 seconds. A node with no scheduler progress for 15 seconds or zero advertised capacity leaves rendezvous assignment until it reports progress and capacity again.
+The embedding service chooses each signed advertisement lifetime, up to 30 seconds. An expired node or one advertising zero capacity leaves rendezvous assignment until it reports progress and capacity again.
 
 Local admission remains authoritative. An advertisement cannot force a node to accept work after its measured budget is exhausted.
 
