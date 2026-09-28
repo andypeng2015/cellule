@@ -10,8 +10,10 @@ From the workspace root:
 
 ```sh
 cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example blob --locked
 cargo run -p cellule-app --example basic --locked
+cargo run -p cellule-app --example workflow --locked
+cargo run -p cellule-app --example schedules --locked
 cargo +1.97.0 check --workspace --all-targets --locked
 cargo test --workspace --all-features --locked
 cargo test -p cellule-ltx --features replica --locked
@@ -27,7 +29,7 @@ node crates/cellule-runtime/docs/validate.mjs
 
 On workstations with the mounted Workspace volume, always set `CARGO_TARGET_DIR` beneath the mounted
 `$HOME/Workspace/crabbuild-target`, with a unique directory per checkout. Use CI
-or a dedicated verification snapshot for broad suites and process tests. The [application integration smoke](docs/quickstart.md#exercise-the-application-and-recovery) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
+or a dedicated verification snapshot for broad suites and process tests. The [application integration smoke](docs/quickstart.md#exercise-all-primitives-and-recovery) exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect with visible read-back results.
 
 ## Change boundaries
 

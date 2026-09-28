@@ -31,7 +31,9 @@ cellule-host → cellule-app → cellule-runtime → cellule-ltx → cellule-sto
 | --- | --- |
 | Compile two Cell types; write KV and claim Queue work | [Basic example](../crates/cellule-app/examples/basic.rs) |
 | Commit SQL, read at a receipt, drain | [Orders example](../crates/cellule-app/examples/orders.rs) |
-| Stage and read Blob content | [Attachments example](../crates/cellule-app/examples/attachments.rs) |
+| Stage and read Blob content | [Blob example](../crates/cellule-app/examples/blob.rs) |
+| Run a Workflow and supervised Activity | [Workflow example](../crates/cellule-app/examples/workflow.rs) |
+| Fire a Cron occurrence and deliver its Effect | [Schedules example](../crates/cellule-app/examples/schedules.rs) |
 | Exercise public primitives and recovery | [Application integration suite](../crates/cellule-app/tests/integration.rs) and [primitive suite](../crates/cellule-app/tests/primitives.rs) |
 | Understand shutdown behavior | [Host lifecycle tests](../crates/cellule-host/tests) |
 | Study qualification and measured evidence | [Qualification profiles](../crates/cellule-runtime/qualification/README.md) |

@@ -22,13 +22,17 @@ they use temporary SQLite files and in-memory object storage:
 ```sh
 cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example blob --locked
+cargo run -p cellule-app --example workflow --locked
+cargo run -p cellule-app --example schedules --locked
 ```
 
 `basic` compiles two Cell types, starts a KV Cell and a Queue Cell, then writes
 and reads a setting and claims and acknowledges a job. `orders` shows SQL;
-`attachments` shows Blob. Each example uses durable commands and typed handles.
-No cloud credentials are needed. Follow the
+`blob` shows Blob; `workflow` runs an Activity; `schedules` fires a Cron
+occurrence and delivers its Effect. Together they exercise all eight
+primitives through durable commands and typed handles. No cloud credentials
+are needed. Follow the
 [step-by-step quickstart](docs/quickstart.md) for expected output and a local
 recovery test.
 
@@ -161,10 +165,12 @@ from `ApplicationHandle`:
 | **Activities** | External work requested by a workflow. | `activities::<M>()` → `ActivitySupervisor` | Run outside SQLite with explicit supervision and lease checks. |
 | **Effects** | Delivery between Cells. | `effects::<M>(target)` → `claim`, `ack` | Source intent is durable; destination applies idempotently. |
 
-The [attachments example](crates/cellule-app/examples/attachments.rs) is a
-complete Blob write/read path. The
+The [example map](crates/cellule-app/docs/examples.md) explains how each
+runnable path works, including the [Blob upload](crates/cellule-app/examples/blob.rs),
+[Workflow activity](crates/cellule-app/examples/workflow.rs), and
+[Cron effect delivery](crates/cellule-app/examples/schedules.rs). The
 [application integration suite](crates/cellule-app/tests/integration.rs)
-exercises all eight primitives and recovery. Read the [primitive guide](crates/cellule-runtime/docs/primitives.md)
+also exercises all eight primitives and recovery. Read the [primitive guide](crates/cellule-runtime/docs/primitives.md)
 and [API guide](docs/api.md#primitive-capabilities) for method details and
 failure behavior. Cross-Cell work uses effects and inboxes; it is not one
 transaction across Cells.

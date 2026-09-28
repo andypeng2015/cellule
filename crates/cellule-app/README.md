@@ -46,6 +46,8 @@ the 33-byte hashed entity mode. See [Topology](docs/topology.md).
 ```sh
 cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example blob --locked
+cargo run -p cellule-app --example workflow --locked
+cargo run -p cellule-app --example schedules --locked
 cargo test -p cellule-app --locked
 ```

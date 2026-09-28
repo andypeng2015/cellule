@@ -1,4 +1,16 @@
-//! Commit an order, then read it at the returned durable receipt.
+//! Commit an order in one SQL Cell, then read it at its durable receipt.
+//!
+//! Run: `cargo run -p cellule-app --example orders --locked`
+//!
+//!   OrdersApp -> descriptor: SQL schema, command and query IDs, Cell type
+//!   Local owner -> Orders Cell: catalog + fence + managed SQLite bootstrap
+//!   Application -> Orders Cell: parameterized INSERT with stable request ID
+//!   Orders Cell -> application: committed output and receipt
+//!   Application -> Orders Cell: SELECT at or beyond that receipt
+//!
+//! The write and its request outcome share one SQLite transaction. The reply
+//! waits for durable publication, so a later receipt-bound read can verify the
+//! exact order value. The fixed IDs and local owner are tutorial fixtures.
 
 use std::{
     sync::{Arc, OnceLock},

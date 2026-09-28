@@ -34,5 +34,5 @@
   <text x="803" y="158" class="detail">Query at that receipt</text>
   <text x="803" y="179" class="detail">Verify published value</text>
   <text x="803" y="201" fill="#fcd34d" font-size="9">orders.rs</text>
-  <text x="28" y="267" class="sub">The attachments example follows the same receipt rule for a Blob upload and read.</text>
+  <text x="28" y="267" class="sub">The Blob example follows the same receipt rule for an upload and read.</text>
 </svg>

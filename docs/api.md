@@ -188,7 +188,7 @@ SQL and source effects select an explicit target.
 | `effects::<M>(target)` | `EffectSource<M>` | `claim`, `validate`, `status`, `ack`, `retry` on a source Cell |
 
 Blob handles require `with_blob_artifact_store` on the application handle;
-the [attachments example](../crates/cellule-app/examples/attachments.rs) shows
+the [Blob example](../crates/cellule-app/examples/blob.rs) shows
 the complete upload and receipt-bound read. Queue and effect lease validation
 use the current owner even when ordinary queries use a replica. Activities and
 effects need explicit supervisors; the application controls their lifecycle.
@@ -208,7 +208,7 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
   writes a setting and reads at its receipt.
 - **Blob:** `Begin`, `PutPart`, then `Complete` with separate mutation
   identities; read the object at the completion receipt. The
-  [attachments example](../crates/cellule-app/examples/attachments.rs) also
+  [Blob example](../crates/cellule-app/examples/blob.rs) also
   verifies the bytes and content type.
 - **Queue:** `send` with a producer identity, `claim` from a chosen shard,
   validate that exact claim on the owner, then `ack`, `retry`, or `extend`
@@ -216,14 +216,17 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
   [basic example](../crates/cellule-app/examples/basic.rs) demonstrates the lease path.
 - **Cron:** `mutate` a schedule, inspect it with `get`, and let the installed
   maintenance runner perform due ticks. A schedule declaration does not by
-  itself start a service scheduler.
+  itself start a service scheduler. The [schedules example](../crates/cellule-app/examples/schedules.rs)
+  drives one explicit tick and effect delivery cycle.
 - **Workflow and Activities:** `start` or `signal` a workflow, read `state`,
   and run the explicitly installed `ActivitySupervisor` for external work.
-  The supervisor checks leases and records completions through the Cell.
+  The supervisor checks leases and records completions through the Cell. The
+  [workflow example](../crates/cellule-app/examples/workflow.rs) runs this path.
 - **Effects:** a command emits a source intent through
   `CommandContext::emit_effect`. An explicitly installed supervisor claims,
   validates, and acknowledges source effects; the destination must apply them
-  idempotently. No cross-Cell SQL transaction is implied.
+  idempotently. The [schedules example](../crates/cellule-app/examples/schedules.rs)
+  uses a signed local peer loopback. No cross-Cell SQL transaction is implied.
 
 The [primitive integration scenario](../crates/cellule-app/tests/primitives.rs)
 runs all of these paths, removes the original SQLite files, restores from

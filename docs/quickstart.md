@@ -1,6 +1,6 @@
 # Run a Cellule application
 
-This path starts two local Cells for KV and Queue, then runs SQL, Blob, and one
+This path uses local Cells to exercise all eight author primitives, then runs one
 recovery test. Use Rust **1.97 or newer** and run commands from the workspace root. The
 examples use temporary SQLite files and in-memory object storage; no cloud
 credentials are required. On a workstation with the mounted Workspace volume,
@@ -11,8 +11,10 @@ checkout its own directory.
 | --- | --- | --- |
 | 1 | `basic` | Two Cell types, a receipt-bound KV read, and a claimed and acknowledged Queue job. |
 | 2 | `orders` | Order 42 is committed and read back as 1999 cents. |
-| 3 | `attachments` | A Blob receipt is uploaded and read back. |
-| 4 | Focused integration test | All eight primitives survive a local owner recovery. |
+| 3 | `blob` | A Blob receipt is uploaded and read back. |
+| 4 | `workflow` | An Activity completes a durable Workflow run. |
+| 5 | `schedules` | A Cron tick emits an Effect; signed local delivery records one reminder. |
+| 6 | Focused integration test | All eight primitives survive a local owner recovery. |
 
 ## 1. Compile an application and use KV and Queue
 
@@ -92,7 +94,7 @@ commands. Reuse an identity only to resolve or retry the **same** command.
 ## 3. Upload and read an attachment
 
 ```sh
-cargo run -p cellule-app --example attachments --locked
+cargo run -p cellule-app --example blob --locked
 ```
 
 Expected application output:
@@ -101,19 +103,59 @@ Expected application output:
 attachment stored: receipt for order 42
 ```
 
-The [Blob source](../crates/cellule-app/examples/attachments.rs) provisions a
+The [Blob source](../crates/cellule-app/examples/blob.rs) provisions a
 Blob Cell and adds a `BlobArtifactStore` to its application handle. It sends
 `Begin`, `PutPart`, and `Complete` as separately identified mutations. The
 completion receipt gates a `BlobQuery::Read`; the example checks the returned
 bytes and content type. Staging a part alone does not publish an attachment.
 
-These three runnable examples cover SQL, KV, Queue, and Blob. The next
-scenario adds Cron schedules, Workflow decisions, supervised Activities, and
-cross-Cell Effects. These operate outside a single SQL transaction where
-appropriate; the [primitive guide](../crates/cellule-runtime/docs/primitives.md)
-explains their retry and ownership rules.
+## 4. Complete a Workflow Activity
 
-## 4. Exercise all primitives and recovery
+```sh
+cargo run -p cellule-app --example workflow --locked
+```
+
+Expected application output:
+
+```text
+workflow welcome/42: completed
+```
+
+The [Workflow source](../crates/cellule-app/examples/workflow.rs) pins a
+definition digest, starts a run, and records an Activity intent with its
+`Running` state. An explicitly installed `ActivitySupervisor` claims and
+validates the work, executes a local `Echo` handler outside SQLite, and records
+the completion. The application queries `Completed` state at that receipt.
+External handlers should use their stable activity idempotency key when they
+call another service.
+
+## 5. Fire a Cron occurrence and deliver its Effect
+
+```sh
+cargo run -p cellule-app --example schedules --locked
+```
+
+Expected application output:
+
+```text
+schedule reminder: one occurrence delivered
+```
+
+The [Schedules source](../crates/cellule-app/examples/schedules.rs) registers a
+Cron Cell and SQL receiver. It stores a fixed-interval schedule, reads it at
+the returned receipt, and explicitly drives one due maintenance tick. That
+tick creates a durable source effect. An `EffectSupervisor` validates the
+source lease, delivers a signed command through a local peer loopback, and
+acknowledges the result only after the receiver's idempotent inbox commits it.
+A SQL query confirms one destination row. The host would own the scheduler,
+supervisor, transport, and authorization in a serving application.
+
+These examples cross Cell boundaries through effects, with separate source
+and destination transactions. The
+[primitive guide](../crates/cellule-runtime/docs/primitives.md) explains the
+retry and ownership rules.
+
+## 6. Exercise all primitives and recovery
 
 ```sh
 cargo test -p cellule-app --test integration \

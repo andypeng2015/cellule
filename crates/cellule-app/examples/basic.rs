@@ -1,9 +1,16 @@
 //! Compile two Cell types, then use KV and Queue through typed handles.
 //!
-//! Run with `cargo run -p cellule-app --example basic --locked`.
-//! `orders.rs` demonstrates SQL; `attachments.rs` demonstrates Blob. The
-//! application integration suite exercises Cron, Workflow, Activities, and
-//! Effects. This example uses local fixtures instead of service credentials.
+//! Run: `cargo run -p cellule-app --example basic --locked`
+//!
+//!   BasicApp -> descriptor: register Settings (KV) and Jobs (Queue)
+//!   Local owner -> two Cells: provision, bootstrap, bind typed handles
+//!   KV Cell: atomic put -> receipt -> read at receipt
+//!   Queue Cell: send -> claim -> validate lease -> acknowledge
+//!
+//! The KV receipt proves the read sees the published value. Queue delivery is
+//! at least once; real consumers perform idempotent external work between
+//! lease validation and acknowledgement. `orders.rs` demonstrates SQL and
+//! `blob.rs` demonstrates Blob. This uses local fixtures, not service ingress.
 
 use std::{
     sync::{Arc, OnceLock},

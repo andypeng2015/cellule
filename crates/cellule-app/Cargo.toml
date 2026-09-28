@@ -45,5 +45,13 @@ name = "orders"
 path = "examples/orders.rs"
 
 [[example]]
-name = "attachments"
-path = "examples/attachments.rs"
+name = "blob"
+path = "examples/blob.rs"
+
+[[example]]
+name = "workflow"
+path = "examples/workflow.rs"
+
+[[example]]
+name = "schedules"
+path = "examples/schedules.rs"
