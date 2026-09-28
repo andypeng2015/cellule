@@ -30,7 +30,7 @@ stateDiagram-v2
 | Fleet pacing | Remains in the planner's movement budget. |
 
 Do not construct a second scheduler, authority, publisher, or runtime alongside
-the host. Use [the embedding guide](../../docs/embedding.md) for startup order.
+the host. Use [the framework integration guide](../../docs/framework.md) for startup order.
 
 ## Read replicas
 

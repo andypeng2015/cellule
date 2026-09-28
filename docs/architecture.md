@@ -1,51 +1,56 @@
 # Architecture and ownership
 
-Cellule is a library framework. The host application supplies object-store implementations and credentials, node transport, authentication, routing, and deployment configuration. Cellule owns the mechanics that must be identical in every embedding product.
+Cellule is a Rust framework embedded in a service. The service defines the
+product API and policies; Cellule supplies the repeatable mechanics of Cell
+identity, one fenced writer, durable commands, exact recovery, and node drain.
+A Cell is addressed by tenant, application, namespace, and partition. Changing
+its owner does not change its identity.
 
 ```mermaid
 flowchart TD
-    Service[Application] --> Host[cellule-host]
-    Service --> HTTP[cellule-peer-http]
-    Host --> App[cellule-app]
-    Host --> Runtime[cellule-runtime]
+    Service[Application: ingress, auth, credentials] --> Host[cellule-host: node lifecycle]
+    Service --> App[cellule-app: descriptor and typed handles]
+    Service --> Peer[cellule-peer-http: optional transport]
+    Host --> Runtime[cellule-runtime: owner, actors, receipts]
     App --> Runtime
-    HTTP --> Runtime
-    Runtime --> LTX[cellule-ltx]
-    LTX --> Store[cellule-store]
-    Store --> Types[cellule-types]
-    Store --> Providers[object_store providers]
+    Peer --> Runtime
+    Runtime --> LTX[cellule-ltx: WAL and verified roots]
+    LTX --> Store[cellule-store: provider-neutral objects]
+    Store --> Types[cellule-types: stable provider identities]
 ```
 
+Dependencies point down from host and app to runtime, LTX, store, and types.
+The host also uses runtime directly. The optional peer adapter depends on
+runtime contracts; it never becomes an application authorization layer. See the
+[workspace reference](workspace-reference.md) for where each crate lives.
 
 ## Boundaries
 
-- `cellule-types` owns stable, dependency-light provider and bucket identities.
-- `cellule-store` wraps `object_store` for bounded reads, retries, compare-and-swap, immutable writes, and classified failures. It cannot decide which Cell root is authoritative.
-- `cellule-ltx` owns SQLite WAL capture, LTX encoding and validation, exact restore, immutable root construction, and authenticated sparse pages. It returns a proposed root; it cannot acknowledge an application request.
-- `cellule-runtime` owns stable identities, control transitions, owner fencing, release and catalog state, actors, durable request outcomes, primitive implementations, and root publication. One Cell command changes one SQLite database; cross-Cell work uses durable effects and idempotent inboxes.
-- `cellule-app` compiles statically linked modules into a bounded application descriptor and author-facing handles. It cannot construct providers or take over a node.
-- `cellule-peer-http` optionally implements owner routing, HTTP response classification, and pinned mTLS using runtime peer contracts. The service still owns receivers and application authorization.
-- `cellule-host` owns exactly one runtime and the lifecycle of its registered facilities. It waits for drain and shutdown; the application owns network and authorization policy.
+| Owner | Responsibility | Does not decide |
+| --- | --- | --- |
+| Application | Domain modules, tenant identity, public ingress, authorization, providers, credentials, deployment policy. | Cell publication or recovery format. |
+| `cellule-app` | Compile static modules and stable topology; expose scoped typed handles. | Network listeners, provider construction, or node lifecycle. |
+| `cellule-host` | One runtime per node, installed facilities, readiness prerequisites, drain and shutdown. | Product routing or authorization policy. |
+| `cellule-runtime` | Cell identity, catalog and authority transitions, owner fencing, actors, request ledger, primitive execution, publication. | Cloud credentials or HTTP endpoints. |
+| `cellule-ltx` | SQLite WAL capture, LTX validation, immutable root construction, exact restore. | Which proposed root is authoritative. |
+| `cellule-store` | Bounded object operations, conditional writes, retries, classified provider failures. | Which Cell owner or root is current. |
+| `cellule-types` | Stable dependency-light provider and bucket identities. | Application behavior. |
+| `cellule-peer-http` | Optional signed owner routing and pinned mTLS transport. | Public receivers and user authorization. |
 
-## Persisted contracts
+The [framework integration guide](framework.md) covers assembly of a serving
+node. The [API guide](api.md) covers application-facing methods and typed
+results.
 
-| Contract | Rule |
-| --- | --- |
-| Cell identity and partitioning | Stable across ownership changes; topology changes require review. |
-| Control revisions and root references | Select state from authority, never from bucket order. |
-| LTX data | Checksums and exact endpoint verification are mandatory. |
-| Hash/signature domains | Preserve existing `crab.*.v1` domains. |
-| CRB1 footer | Retain the `repository` key, whose value is a Cell ID. |
-| Blob artifacts | Use `.cellule/blob-parts/` or the store's scoped prefix. |
-| Framework descriptors | Use `cellule`, `cellule.application.v1`, and the `application` catalog role. |
-| Peer schema | Use `cellule.peer.v1`; authenticate and authorize in the service. |
+## Command path and durability gate
 
-## Command durability
+One command mutates **one** Cell's SQLite database. Its state transition and
+request outcome are recorded in the same transaction, so recovery does not
+separate the data from the answer returned for that request identity.
 
 ```mermaid
 sequenceDiagram
     participant App as Typed application
-    participant Owner as Cell owner
+    participant Owner as Fenced Cell owner
     participant SQL as Managed SQLite
     participant LTX as LTX and object store
     participant Authority as Control CAS
@@ -57,18 +62,85 @@ sequenceDiagram
     Owner->>Authority: Publish exact root with owner fence
     alt CAS accepted
         Authority-->>Owner: Durable publication proof
-        Owner-->>App: Result and receipt
+        Owner-->>App: Output and receipt
     else Owner changed or reply ambiguous
         Owner-->>App: Fenced or unresolved outcome
     end
 ```
 
-The diagram shows object durability. A configured follower-log mode uses a
-recoverable follower proof before acknowledgement, then publishes to object
-storage. Both modes use the same runtime output gate.
+This is the object-store path. A configured follower-log path may acknowledge
+after a recoverable follower proof; object publication follows. Both modes use
+the same output gate. A transport timeout or lost reply does not prove the
+handler failed. The caller resolves the **original** request identity before
+attempting the exact command again. Read
+[execution](../crates/cellule-runtime/docs/runtime.md) and
+[failover](../crates/cellule-runtime/docs/failover-and-followers.md) for the
+protocol details.
 
-## Verification levels
+A `Receipt` names the Cell, owner incarnation, and commit sequence. A later
+query can require at least that receipt. It is a per-Cell observation rule, not
+a transaction across Cells. The default query is owner-ordered; an explicitly
+selected replica must prove its minimum receipt or fail closed.
 
-Unit and integration tests are carried with each crate. The application reference test exercises all registered primitives against an in-memory object store. Production qualification also requires provider round trips, owner-loss recovery, process interruption, capacity, and cross-node tests in a dedicated environment. This repository does not claim that those external gates have passed.
+## Authority and recovery
 
-Existing storage prefixes require a reviewed migration before upgrades.
+The object store holds immutable data. The authority control record identifies
+the fenced owner and the exact root to restore. Listing objects cannot elect a
+root. A successor owner follows this sequence:
+
+1. Observe and fence the prior owner through authority.
+2. Read the authority-pinned root, not the newest-looking object key.
+3. Verify the root and every required LTX chunk, checksum, and endpoint.
+4. Reconstruct byte-identical SQLite state or fail without activating the Cell.
+5. Resume request resolution from the recovered outcome ledger.
+
+```mermaid
+flowchart LR
+    Control[Authority-pinned root] --> Fetch[Fetch required immutable chunks]
+    Fetch --> Verify{All bytes and endpoints verify?}
+    Verify -->|yes| Restore[Restore exact SQLite state]
+    Verify -->|no| Fail[Fail recovery]
+    Restore --> Fence[Activate fenced successor]
+```
+
+A stale local database, partial object listing, or merely plausible snapshot
+cannot be promoted. Read [storage](../crates/cellule-runtime/docs/storage.md)
+and the [LTX guide](../crates/cellule-ltx/docs/README.md) for formats and
+restore behavior.
+
+## Work that crosses Cells
+
+Commands are single-Cell transactions. Effects append a durable source intent;
+a destination uses an idempotent inbox before applying it. Queue leases and
+workflow activities are also explicit durable workflows around external work.
+None of these imply an atomic SQL transaction spanning multiple Cells. Blob
+parts require a complete cross-Cell reference set, quiesced writes, and a
+grace boundary before deletion.
+
+## Persisted and exchanged contracts
+
+| Contract | Why edits require review |
+| --- | --- |
+| Cell IDs, namespaces, partitions, and descriptors | Route requests and select persisted state across releases. |
+| Catalog roles, schema versions, operation IDs, and codecs | Bind compiled code to the owner and stored request outcomes. |
+| Authority revisions and root references | Fence writers and select the only valid recovery root. |
+| LTX bytes and object paths | Must be read and verified by future owners. |
+| Signed peer messages and hash domains | Must authenticate and remain compatible during rollout. |
+| Blob-part references | Govern safe retention and deletion across Cells. |
+
+Existing prefixes or signed peers require a reviewed migration before a
+compatibility promise. See the [release guide](releasing.md) and
+[roadmap](roadmap.md) for qualification gates and current gaps.
+
+## What the test layers prove
+
+| Level | Evidence |
+| --- | --- |
+| Unit and contracts | IDs, descriptors, schemas, codecs, and pure coordination decisions. |
+| Application integration | Typed call, durable output, receipt-bound read, and local recovery across all primitives. |
+| Process and provider | Separate nodes, object-store behavior, owner loss, and drain in a named environment. |
+| Production qualification | Provider, load, fault, security, compatibility, and rollout evidence from controlled runs. |
+
+A local in-memory test does not establish cloud-provider or production behavior.
+The [qualification guide](../crates/cellule-runtime/docs/delivery.md) names the
+levels and their evidence.

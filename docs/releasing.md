@@ -1,68 +1,92 @@
 # Releasing Cellule
 
-The seven workspace crates publish to crates.io as `cellule-types`,
-`cellule-store`, `cellule-ltx`, `cellule-runtime`, `cellule-app`, and
-`cellule-host`, and the optional `cellule-peer-http`. They share one version: an application depends on the
-set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
+Cellule publishes seven crates as one matched version. The workspace currently
+pins every internal dependency to `=0.1.0`; change all crate versions and pins
+together for a release. Publish in dependency order, then verify the released
+set from a clean consumer. This guide is a release checklist, not evidence that
+a release or provider qualification has happened.
 
-## Before the first release
+## 1. Freeze the contract
 
-1. Check the registry for existing names and versions:
+Review producers and consumers before changing a persisted or wire format:
 
-   ```sh
-   for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host cellule-peer-http; do
-     curl -s -A 'cellule-release-check' "https://crates.io/api/v1/crates/$crate" \
-       | grep -q 'does not exist' && echo "$crate: free" || echo "$crate: TAKEN"
-   done
-   ```
+| Contract | Review before release |
+| --- | --- |
+| Cell and module identity | Namespace, partition rule, role, schema version, operation IDs, and descriptor digest. |
+| Durable state | SQLite migration path, LTX encoding, root and object paths, WAL boundary, and recovery verification. |
+| Coordination | Owner fence, authority compare-and-swap, request outcome, receipt, and follower proof. |
+| Peer protocol | Signed messages, replay windows, and compatible rollout behavior. |
+| Blob lifecycle | Cross-Cell references, quiescence, and deletion grace boundary. |
 
-2. Run the full gate from a clean checkout:
+The [API guide](api.md) describes author-visible contracts. The
+[architecture guide](architecture.md) explains why publication and recovery
+must agree on one exact root. Record the source revision, target version,
+compatibility decision, and migration evidence in release notes.
 
-   ```sh
-   cargo fmt --all --check
-   cargo check --workspace --all-targets --locked
-   cargo test --workspace --all-features --locked
-   cargo test -p cellule-ltx --features replica --locked
-   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
-   python3 scripts/check-boundaries.py
-   python3 scripts/check-module-layout.py
-   python3 scripts/check-doc-rust-fences.py
-   python3 scripts/check-doc-links.py
-   node crates/cellule-runtime/docs/validate.mjs
-   ```
+## 2. Verify the candidate
 
-3. Package every crate. `cargo package` for a single crate cannot resolve the
-   unpublished workspace dependencies, so package the workspace as a set:
-
-   ```sh
-   cargo package --workspace --locked
-   ```
-
-## Publishing order
-
-Publish in dependency order so each crate can resolve the ones below it:
+Run broad suites in CI or an isolated verification snapshot. On workstations
+with the mounted Workspace volume, give this checkout its own
+`CARGO_TARGET_DIR` beneath `$HOME/Workspace/crabbuild-target`.
 
 ```sh
-cargo publish -p cellule-types
-cargo publish -p cellule-store
-cargo publish -p cellule-ltx
-cargo publish -p cellule-runtime
-cargo publish -p cellule-app
-cargo publish -p cellule-host
-cargo publish -p cellule-peer-http
+cargo fmt --all --check
+cargo check --workspace --all-targets --all-features --locked
+cargo test --workspace --all-features --locked
+cargo test -p cellule-ltx --no-default-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
+python3 scripts/check-boundaries.py
+python3 scripts/check-module-layout.py
+python3 scripts/check-doc-rust-fences.py
+python3 scripts/check-doc-links.py
+node crates/cellule-runtime/docs/validate.mjs
 ```
 
-Wait for each crate to appear in the registry index before publishing the next
-one. `cargo publish --dry-run` verifies a crate that has no unpublished
-dependencies, which is why the order matters. Publishing requires a crates.io
-token; nothing in this repository uploads on its own.
+These checks establish local code and documentation behavior. Provider,
+scale, compatibility, and fault claims need their own measured artifacts and
+signed receipts. Use the [qualification profiles](../crates/cellule-runtime/qualification/README.md)
+and [delivery evidence guide](../crates/cellule-runtime/docs/delivery.md);
+do not substitute a synthetic workload for protected evidence.
 
-## After publishing
+## 3. Package and inspect
 
-- Tag the release and record the exact revisions in the release notes.
-- Applications can adopt the published `cellule-*` dependencies. Cellule
-  remains the source of truth for their contracts.
-- Keep the bundled attributions with the published crates: `cellule-ltx`
-  ships `LICENSE` and `LICENSE.pierrec-lz4`, and its `UPSTREAM.md` must keep
-  naming the Celld, rustyriver, Litestream, and LTX sources.
+From a clean candidate revision, package the complete workspace so Cargo can
+resolve its unpublished path dependencies together:
+
+```sh
+cargo package --workspace --locked
+```
+
+Inspect packaged manifests, included files, license and attribution files,
+and the generated archive contents. In particular, `cellule-ltx` carries its
+[upstream provenance](../crates/cellule-ltx/UPSTREAM.md) and bundled license
+files. Run the package check again after any manifest or include-list change.
+
+## 4. Publish in dependency order
+
+Wait until each version is visible in the registry index before publishing the
+next crate. Use the same version for all seven crates.
+
+```sh
+cargo publish -p cellule-types --locked
+cargo publish -p cellule-store --locked
+cargo publish -p cellule-ltx --locked
+cargo publish -p cellule-runtime --locked
+cargo publish -p cellule-app --locked
+cargo publish -p cellule-host --locked
+cargo publish -p cellule-peer-http --locked
+```
+
+`cellule-peer-http` is optional for applications, but is part of the matched
+workspace set. Publishing requires registry credentials and is an explicit
+release action; none of the verification commands upload a crate.
+
+## 5. Verify the published set
+
+Create a clean consumer using the published exact versions, compile a typed
+application, and run its local write/read path. Confirm the registry versions,
+tag the exact source revision, and link the qualification artifacts in release
+notes. If publication stops partway through the set, record which versions are
+visible and finish or supersede that set deliberately; crates already uploaded
+cannot be silently replaced.

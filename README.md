@@ -1,24 +1,23 @@
 # Cellule
 
 Cellule is an embedded Rust framework for distributed, SQLite-backed **Cells**.
-A Cell has one fenced writer, records each command outcome with its state, and
-can recover from a verified, authority-pinned root. Your application defines
-the domain and owns ingress, authorization, credentials, and deployment policy.
+An application defines typed modules and Cell topology; Cellule runs commands
+through a fenced owner, publishes durable outcomes, and restores exact state.
+The application owns HTTP ingress, authorization, credentials, and deployment.
 
 ![Cellule component boundaries: application policy, typed API, host lifecycle, runtime, SQLite, object storage, and authority](diagram/cellule-overview.svg)
 
 | Term | Meaning |
 | --- | --- |
-| **Module** | Rust code that declares schema and typed operations. |
-| **Cell type** | A descriptor that names a module, namespace, role, and shard count. |
-| **Cell** | One provisioned state partition with a single fenced writer. |
-| **Receipt** | A value returned with a durable command; use it to require that a later read observes that command. |
+| **Module** | Statically linked Rust code that declares schemas and operations. |
+| **Cell type** | A stable namespace, role, and partition rule compiled into an application descriptor. |
+| **Cell** | One addressed state partition with a single fenced writer. |
+| **Receipt** | A returned observation position that a later read can require. |
 
-## Run your first Cell
+## Start locally
 
-Use Rust **1.97 or newer**. These examples use temporary SQLite files and an
-in-memory object store, so they need no cloud account or credentials. Run them
-from the repository root:
+Use Rust **1.97 or newer**. From the workspace root, run these local examples;
+they use temporary SQLite files and in-memory object storage:
 
 ```sh
 cargo run -p cellule-app --example application_descriptor --locked
@@ -26,31 +25,37 @@ cargo run -p cellule-app --example orders --locked
 cargo run -p cellule-app --example attachments --locked
 ```
 
-The first command compiles a module and Cell type into a stable application
-descriptor; it does not start a Cell. The second provisions a SQL Cell, commits
-order 42, and reads it back at the commit receipt. The third uploads a Blob
-attachment and reads it at its completion receipt. The latter two print:
-
-```text
-order 42 total: 1999 cents
-attachment stored: receipt for order 42
-```
+The first command compiles a descriptor without starting a Cell. The others
+print `order 42 total: 1999 cents` and
+`attachment stored: receipt for order 42` after a durable write and a
+receipt-bound read. No cloud credentials are needed. Follow the
+[step-by-step quickstart](docs/quickstart.md) for expected output and a local
+recovery test.
 
 ![First Cell path: describe, start, commit, and observe at a receipt](diagram/first-cell.svg)
 
-The complete, runnable sources are
-[application_descriptor.rs](crates/cellule-app/examples/application_descriptor.rs),
-[orders.rs](crates/cellule-app/examples/orders.rs), and
-[attachments.rs](crates/cellule-app/examples/attachments.rs). The
-[quickstart](docs/quickstart.md) walks through each step and a local recovery
-test.
+## Follow one complete application path
 
-## Define an application in Rust
+The [runnable orders example](crates/cellule-app/examples/orders.rs) contains
+the complete local setup. It declares a SQL module and migration, compiles an
+application, provisions a catalog entry and fenced owner, bootstraps a managed
+Cell, invokes it through a typed handle, checks the observed row, and drains
+the runtime. The snippets below are from that compiled example; keep the full
+source open if you are copying them into an application.
 
-A module owns its schema and operations. A `CellApplication` registers that
-module and declares its Cell type. This is the registration from the compiled
-[orders example](crates/cellule-app/examples/orders.rs); `Orders` and `ORDERS`
-are defined immediately above it in that file:
+| Stage | What the example establishes |
+| --- | --- |
+| Declare | `Orders` registers a SQL schema and stable command/query IDs. |
+| Compile | `OrdersApp` binds the module to a `CellType`; the descriptor pins source and lockfile digests. |
+| Provision | A `CellTarget`, catalog entry, authority record, and owner session identify one Cell. |
+| Bootstrap | `CellRuntime` opens managed SQLite and its LTX replica before the typed client is used. |
+| Invoke | A stable request ID identifies the order mutation; the returned receipt gates the read. |
+| Stop | Runtime shutdown runs on both success and error paths. |
+
+### Declare the application
+
+`Orders` and `ORDERS` are defined in the full source. Their module descriptor
+includes the schema migration and operation contracts used here:
 
 ```rust
 struct OrdersApp;
@@ -72,104 +77,129 @@ impl CellApplication for OrdersApp {
 }
 ```
 
-The module name, namespace ID, role, shard count, migrations, and operation
-IDs become descriptor contracts. After compiling the application and starting
-a Cell owner, `ApplicationHandle::<OrdersApp>` exposes a typed `SqlCell<Orders>`
-handle. The [API guide](docs/api.md) maps the public Rust surface; the
-[application guide](crates/cellule-app/docs/README.md) covers topology choices.
+`CellApplication::compile` checks the module and topology before any Cell
+starts. Stable namespace IDs, partition rules, schema versions, and operation
+IDs are compatibility contracts; see the [API guide](docs/api.md) before
+changing them.
 
-## Commit, then read at the receipt
+### Commit and verify a receipt-bound read
 
-This excerpt from the same [runnable orders example](crates/cellule-app/examples/orders.rs)
-shows the application-facing command and query. `sql`, `now_ms`, and the order
-constants come from that example. The request ID stays stable across retries;
-the receipt asks the query to observe the published command:
+This function is the example's complete application-level operation. The
+caller obtains `SqlCell<Orders>` from `ApplicationHandle::<OrdersApp>` after
+bootstrapping the Cell:
 
 ```rust
-let committed = sql
-    .batch(
-        MutationIdentity {
-            request_id: RequestId::from_bytes([6; 16]),
-            issued_at_ms: now_ms,
-            expires_at_ms: now_ms + 60_000,
-        },
-        SqlBatch {
-            statements: vec![SqlStatement {
-                sql: "INSERT INTO orders (id, total_cents) VALUES (?1, ?2)".into(),
-                parameters: vec![
-                    SqlValue::Integer(ORDER_ID),
-                    SqlValue::Integer(ORDER_TOTAL_CENTS),
-                ],
-            }],
-        },
-    )
-    .await?;
+async fn commit_and_read_order(sql: &SqlCell<Orders>) -> ExampleResult<i64> {
+    let now_ms = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let committed = sql
+        .batch(
+            MutationIdentity {
+                request_id: RequestId::from_bytes([6; 16]),
+                issued_at_ms: now_ms,
+                expires_at_ms: now_ms + 60_000,
+            },
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "INSERT INTO orders (id, total_cents) VALUES (?1, ?2)".into(),
+                    parameters: vec![
+                        SqlValue::Integer(ORDER_ID),
+                        SqlValue::Integer(ORDER_TOTAL_CENTS),
+                    ],
+                }],
+            },
+        )
+        .await?;
 
-let observed = sql
-    .query(
-        Some(committed.receipt),
-        SqlBatch {
-            statements: vec![SqlStatement {
-                sql: "SELECT total_cents FROM orders WHERE id = ?1".into(),
-                parameters: vec![SqlValue::Integer(ORDER_ID)],
-            }],
-        },
-    )
-    .await?;
+    // The receipt requires the query to observe this published command.
+    let observed = sql
+        .query(
+            Some(committed.receipt),
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "SELECT total_cents FROM orders WHERE id = ?1".into(),
+                    parameters: vec![SqlValue::Integer(ORDER_ID)],
+                }],
+            },
+        )
+        .await?;
+    let [result] = observed.output.as_slice() else {
+        return Err(Error::Control("expected one order query result").into());
+    };
+    let [row] = result.rows.as_slice() else {
+        return Err(Error::Control("expected one order row").into());
+    };
+    let [SqlValue::Integer(total_cents)] = row.as_slice() else {
+        return Err(Error::Control("expected an integer order total").into());
+    };
+    if *total_cents != ORDER_TOTAL_CENTS {
+        return Err(Error::Control("published order total differs").into());
+    }
+    Ok(*total_cents)
+}
 ```
 
-The full example checks `observed.output` and drains the runtime on both
-success and error paths. Use a **new request ID for each new logical command**;
-reuse the same ID when retrying that command.
+The request ID stays the same for retries of **this** command; a new logical
+command needs a new ID. `batch` returns a `Committed` value only after the
+durability gate. Passing `Some(committed.receipt)` to `query` requires the read
+to observe that committed position. The function checks the actual row instead
+of treating a successful transport call as proof of application behavior.
 
-## What makes the reply durable?
+## Choose a primitive
+
+Every primitive uses the same Cell owner, durable request outcome, publication
+gate, and receipt. Choose by the shape of work, then use the typed capability
+from `ApplicationHandle`:
+
+| Primitive | Use it for | Entry point | Key rule |
+| --- | --- | --- | --- |
+| **SQL** | Relational state in one Cell. | `sql::<M>(target)` → `batch`, `query` | Parameterized, bounded statements; one Cell transaction. |
+| **KV** | Scoped metadata and conditional updates. | `kv::<M>(namespace)` → `atomic`, `get`, `list` | Checks and mutations share one shard transaction. |
+| **Blob** | Multipart content and metadata. | `blob::<M>()` → `mutate`, `query` | Stage parts, publish references, read at a receipt. |
+| **Queue** | At-least-once work delivery. | `queue::<M>()` → `send`, `claim`, `ack` | Claims have tokens and leases; validate before external work. |
+| **Cron** | Durable recurring schedules. | `cron::<M>()` → `mutate`, `get` | Activation is bounded and deduplicated. |
+| **Workflow** | Durable, multi-step decisions. | `workflow::<M>()` → `start`, `signal`, `state` | Decisions and history survive owner changes. |
+| **Activities** | External work requested by a workflow. | `activities::<M>()` → `ActivitySupervisor` | Run outside SQLite with explicit supervision and lease checks. |
+| **Effects** | Delivery between Cells. | `effects::<M>(target)` → `claim`, `ack` | Source intent is durable; destination applies idempotently. |
+
+The [attachments example](crates/cellule-app/examples/attachments.rs) is a
+complete Blob write/read path. The
+[application integration suite](crates/cellule-app/tests/integration.rs)
+exercises all eight primitives and recovery. Read the [primitive guide](crates/cellule-runtime/docs/primitives.md)
+and [API guide](docs/api.md#primitive-capabilities) for method details and
+failure behavior. Cross-Cell work uses effects and inboxes; it is not one
+transaction across Cells.
+
+## Why a successful reply survives recovery
 
 ![Durable command sequence: SQLite outcome, verified LTX root, authority CAS, then result and receipt](diagram/durable-command.svg)
 
-The owner commits the mutation and its outcome in one SQLite transaction. On
-the object-store path it prepares immutable, verified LTX bytes and pins the
-exact root through the fenced authority compare-and-swap before replying. A
-configured follower-log path can acknowledge after a recoverable follower
-proof, with object publication following. Recovery uses only the pinned root
-and verifies every required chunk; a bucket listing or stale local database
-cannot choose state. Read the [runtime](crates/cellule-runtime/docs/runtime.md),
-[storage](crates/cellule-runtime/docs/storage.md), and
-[failover](crates/cellule-runtime/docs/failover-and-followers.md) guides for the
-precise protocols.
+A command stores its state change and outcome in one SQLite transaction. On
+the object-store path, the owner prepares verified LTX bytes and pins the exact
+root through fenced authority compare-and-swap before replying. A configured
+follower-log path can acknowledge after recoverable follower proof, with object
+publication following. Recovery selects the authority-pinned root and verifies
+every required chunk; a bucket listing cannot choose state. If a response is
+lost, resolve the original request ID before retrying. See
+[architecture](docs/architecture.md) and [runtime execution](crates/cellule-runtime/docs/runtime.md).
 
-## Find your layer
+## Go deeper
 
-| Layer | Crate | Start here |
-| --- | --- | --- |
-| Identity | [cellule-types](crates/cellule-types/README.md) | [Identity guide](crates/cellule-types/docs/README.md) |
-| Transport | [cellule-store](crates/cellule-store/README.md) | [Store guide](crates/cellule-store/docs/README.md) |
-| Persistence | [cellule-ltx](crates/cellule-ltx/README.md) | [LTX guide](crates/cellule-ltx/docs/README.md) |
-| Execution | [cellule-runtime](crates/cellule-runtime/README.md) | [Runtime guide](crates/cellule-runtime/docs/README.md) |
-| Application | [cellule-app](crates/cellule-app/README.md) | [Author guide](crates/cellule-app/docs/README.md) |
-| Lifecycle | [cellule-host](crates/cellule-host/README.md) | [Host guide](crates/cellule-host/docs/README.md) |
-| Optional peer adapter | [cellule-peer-http](crates/cellule-peer-http/README.md) | [Peer guide](crates/cellule-peer-http/docs/README.md) |
+| Task | Guide |
+| --- | --- |
+| Run examples and a recovery test | [Quickstart](docs/quickstart.md) |
+| Choose typed methods and handle outcomes | [API](docs/api.md) |
+| Understand ownership, storage, and recovery | [Architecture](docs/architecture.md) |
+| Embed Cellule in a serving service | [Framework integration](docs/framework.md) |
+| Find the right crate or test | [Workspace reference](docs/workspace-reference.md) |
+| Evaluate current support and gaps | [Roadmap](docs/roadmap.md) |
+| Qualify and publish a matched crate set | [Release guide](docs/releasing.md) |
 
-Dependencies point down: `host → app → runtime → ltx → store → types`. The
-optional peer adapter uses runtime contracts; the application still owns HTTP
-endpoints and authorization. See [architecture](docs/architecture.md) for
-ownership boundaries and persisted formats, and [embedding](docs/embedding.md)
-for serving-node startup and shutdown.
-
-## Verify and contribute
-
-Run the local recovery scenario after the examples:
-
-```sh
-cargo test -p cellule-app --test integration \
-  primitives::typed_application_executes_every_primitive_through_a_local_router \
-  --locked -- --exact
-```
-
-The [contributor checks](CONTRIBUTING.md) cover formatting, targets, docs,
-and contract validation. The [qualification guide](crates/cellule-runtime/docs/delivery.md)
-separates local proof from provider and production evidence. See the
-[release guide](docs/releasing.md) and [LTX attribution](crates/cellule-ltx/UPSTREAM.md)
-for publication details. The [synthesis record](docs/synthesis.md),
-[verification report](docs/verification.md), and
-[dated performance evidence](crates/cellule-app/PERFORMANCE.md) describe their
+The workspace layers are `cellule-types → cellule-store → cellule-ltx →
+cellule-runtime → cellule-app → cellule-host`; the optional
+[cellule-peer-http](crates/cellule-peer-http/README.md) adapter uses runtime
+contracts. [Contributing](CONTRIBUTING.md) lists local checks, and the
+[qualification guide](crates/cellule-runtime/docs/delivery.md) separates local
+tests from provider and production evidence. The dated
+[verification report](docs/verification.md) and
+[performance evidence](crates/cellule-app/PERFORMANCE.md) describe their
 recorded revisions and environments.

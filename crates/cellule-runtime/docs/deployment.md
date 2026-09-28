@@ -29,6 +29,6 @@ withdraws the node session.
 Configuration is an application contract. Cellule does not provide a
 Kubernetes chart or product HTTP routes. See [host lifecycle](../../cellule-host/docs/lifecycle.md),
 [peer security](../../cellule-peer-http/docs/security.md), and the
-[workspace embedding guide](../../../docs/embedding.md).
+[workspace framework integration guide](../../../docs/framework.md).
 
 For fleet sizing, rollout, drain, and observation detail, read the [detailed reference](deployment-detailed.md).

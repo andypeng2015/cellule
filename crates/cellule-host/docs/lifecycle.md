@@ -25,5 +25,5 @@ sequenceDiagram
 A deadline bounds releases started after acquiring the drain lane; it does not
 bound waiting for that lane. Fleet-level pacing stays in the movement planner.
 The node retains lease maintenance while accepted work and covered log tails
-are drained. See [the embedding guide](../../../docs/embedding.md) for service
+are drained. See [the framework integration guide](../../../docs/framework.md) for service
 startup order.

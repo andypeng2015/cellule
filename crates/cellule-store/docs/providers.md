@@ -23,4 +23,4 @@ flowchart TD
 
 A failed probe must be handled before the host advertises readiness. Local
 in-memory providers are useful for tests; production scope validation belongs
-to the service. Start with [the embedding guide](../../../docs/embedding.md).
+to the service. Start with [the framework integration guide](../../../docs/framework.md).

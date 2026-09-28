@@ -1,7 +1,9 @@
 # Synthesis verification — 2026-09-27
 
 Historical import source: `beb439039cb37e750afe6625a2358101c70d1191`.
-Cellule base: `56b35ab`. See the [synthesis ledger](synthesis.md) for adaptations.
+Cellule base: `56b35ab`. This dated report records verification of that import
+revision; current qualification routes are in the
+[delivery evidence guide](../crates/cellule-runtime/docs/delivery.md).
 
 ## Environment
 
