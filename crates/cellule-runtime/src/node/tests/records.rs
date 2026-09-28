@@ -2,6 +2,32 @@
 
 use super::*;
 
+#[test]
+fn signed_advertisement_accepts_thirty_second_lifetime_and_rejects_longer() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let sign = |lifetime_ms| {
+        NodeAdvertisement::sign(
+            NodeId::from_bytes([1; 16]),
+            SessionId::from_bytes([1; 16]),
+            "https://node-1.internal:8789".into(),
+            Digest::from_bytes([2; 32]),
+            Digest::from_bytes([3; 32]),
+            Digest::from_bytes([4; 32]),
+            Digest::from_bytes([5; 32]),
+            &key,
+            1,
+            NOW_MS,
+            NOW_MS + lifetime_ms,
+            vec![Digest::from_bytes([6; 32])],
+            vec![1],
+            NodeFailureDomain::default(),
+            NodeCapacity::default(),
+        )
+    };
+    assert!(sign(30_000).is_ok());
+    assert!(sign(30_001).is_err());
+}
+
 #[tokio::test]
 async fn create_load_and_refresh_preserve_signed_boot_identity() {
     let key = SigningKey::from_bytes(&[7; 32]);
