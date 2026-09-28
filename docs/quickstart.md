@@ -10,7 +10,7 @@ checkout its own directory.
 | Step | Run | What you should observe |
 | --- | --- | --- |
 | 1 | `basic` | Two Cell types, a receipt-bound KV read, and a claimed and acknowledged Queue job. |
-| 2 | `orders` | Order 42 is committed and read back as 1999 cents. |
+| 2 | `sql` | Order 42 is committed and read back as 1999 cents. |
 | 3 | `blob` | A Blob receipt is uploaded and read back. |
 | 4 | `workflow` | An Activity completes a durable Workflow run. |
 | 5 | `schedules` | A Cron tick emits an Effect; signed local delivery records one reminder. |
@@ -52,7 +52,7 @@ before changing a released declaration.
 ## 2. Commit and read an order
 
 ```sh
-cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example sql --locked
 ```
 
 Expected application output:
@@ -61,7 +61,7 @@ Expected application output:
 order 42 total: 1999 cents
 ```
 
-The [runnable source](../crates/cellule-app/examples/orders.rs) follows the
+The [runnable source](../crates/cellule-app/examples/sql.rs) follows the
 full local path:
 
 1. `Orders` declares a SQL schema and fixed command/query IDs; `OrdersApp`

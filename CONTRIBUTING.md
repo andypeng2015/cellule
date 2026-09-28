@@ -9,7 +9,7 @@ Use Rust 1.97 or newer. The design-contract validator also needs Node.js and the
 From the workspace root:
 
 ```sh
-cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example sql --locked
 cargo run -p cellule-app --example blob --locked
 cargo run -p cellule-app --example basic --locked
 cargo run -p cellule-app --example workflow --locked

@@ -21,14 +21,14 @@ they use temporary SQLite files and in-memory object storage:
 
 ```sh
 cargo run -p cellule-app --example basic --locked
-cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example sql --locked
 cargo run -p cellule-app --example blob --locked
 cargo run -p cellule-app --example workflow --locked
 cargo run -p cellule-app --example schedules --locked
 ```
 
 `basic` compiles two Cell types, starts a KV Cell and a Queue Cell, then writes
-and reads a setting and claims and acknowledges a job. `orders` shows SQL;
+and reads a setting and claims and acknowledges a job. `sql` shows SQL;
 `blob` shows Blob; `workflow` runs an Activity; `schedules` fires a Cron
 occurrence and delivers its Effect. Together they exercise all eight
 primitives through durable commands and typed handles. No cloud credentials
@@ -40,7 +40,7 @@ recovery test.
 
 ## Follow one complete application path
 
-The [runnable orders example](crates/cellule-app/examples/orders.rs) contains
+The [runnable SQL example](crates/cellule-app/examples/sql.rs) contains
 the complete local setup. It declares a SQL module and migration, compiles an
 application, provisions a catalog entry and fenced owner, bootstraps a managed
 Cell, invokes it through a typed handle, checks the observed row, and drains

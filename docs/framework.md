@@ -52,7 +52,7 @@ flowchart LR
    client to the compiled application, tenant, and application IDs, then select
    the Cell with a declared partition rule. A command returns a typed output
    and receipt only after its durability gate. A later query may require that
-   receipt. The [orders example](../crates/cellule-app/examples/orders.rs)
+   receipt. The [SQL example](../crates/cellule-app/examples/sql.rs)
    shows the local setup and invocation; serving products supply their own
    listener and routing.
 

@@ -3,7 +3,7 @@
 This guide follows the public Rust API an application uses to declare Cells and
 invoke them. Start with the [README examples](../README.md#start-locally)
 if you have not run a Cell yet. The executable
-[orders example](../crates/cellule-app/examples/orders.rs) shows the full path,
+[SQL example](../crates/cellule-app/examples/sql.rs) shows the full path,
 including catalog provisioning and a local runtime.
 
 ## Choose an entry point
@@ -69,7 +69,7 @@ The [basic example](../crates/cellule-app/examples/basic.rs) declares KV and
 Queue modules, compiles them through `CellApplication::compile(build)`, and
 uses both through typed handles. Its `BuildDescriptor` records a source
 revision and Cargo lock digest. The separate
-[orders example](../crates/cellule-app/examples/orders.rs) shows a SQL module.
+[SQL example](../crates/cellule-app/examples/sql.rs) shows a SQL module.
 
 ### What a module descriptor freezes
 
@@ -85,7 +85,7 @@ registry rejects missing or extra bindings. A custom `Command` executes in one
 Cell transaction through `CommandContext`; a `Query` receives a read-only
 `QueryContext`. Their `WireValue` inputs and outputs use bounded codecs. See
 [native Rust authoring](../crates/cellule-runtime/docs/rust-api.md) and the
-[orders module](../crates/cellule-app/examples/orders.rs) for the concrete
+[SQL module](../crates/cellule-app/examples/sql.rs) for the concrete
 registration code.
 
 ## 2. Bind a client and select a Cell
@@ -93,7 +93,7 @@ registration code.
 Once a service has provisioned a catalog entry, established an owner, and
 started a `CellClient`, bind that client to the compiled application and the
 service-selected tenant and application IDs. These lines come from the
-[runnable orders example](../crates/cellule-app/examples/orders.rs):
+[runnable SQL example](../crates/cellule-app/examples/sql.rs):
 
 ```rust
 let client = CellClient::local(registry, handle);
@@ -106,7 +106,7 @@ not match the compiled artifact. Its calls also reject targets outside the
 bound tenant, application, namespace, or declared partition scheme.
 
 Use `target_for_scope(namespace, scope)` to derive a target from the declared
-fixed-shard or entity scheme. The local orders example selects its sole fixed
+fixed-shard or entity scheme. The local SQL example selects its sole fixed
 shard explicitly:
 
 ```rust
@@ -135,7 +135,7 @@ example. Key bytes must remain stable across compatible releases.
 A `MutationIdentity` contains `request_id`, `issued_at_ms`, and
 `expires_at_ms`. Give each logical command a fresh request ID, then keep that
 identity unchanged if the same command must be retried or resolved. The
-[orders example](../crates/cellule-app/examples/orders.rs) passes
+[SQL example](../crates/cellule-app/examples/sql.rs) passes
 `Some(committed.receipt)` to `SqlCell::query`, so the read must observe the
 published write. A `Receipt` identifies a Cell, owner incarnation, and commit
 sequence; a query returns its actual observation position.
@@ -200,7 +200,7 @@ for exercised SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect paths.
 
 - **SQL:** get `SqlCell<M>` for an explicit target, call `batch` with a fresh
   mutation identity, then call `query(Some(committed.receipt), ...)`. The
-  [orders example](../crates/cellule-app/examples/orders.rs) checks the
+  [SQL example](../crates/cellule-app/examples/sql.rs) checks the
   returned row and drains the runtime.
 - **KV:** use one scope in `KvAtomicRequest` to combine checks and mutations,
   then `get` or `list` on its derived shard. A returned version can be used in

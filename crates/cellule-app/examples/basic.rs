@@ -9,7 +9,7 @@
 //!
 //! The KV receipt proves the read sees the published value. Queue delivery is
 //! at least once; real consumers perform idempotent external work between
-//! lease validation and acknowledgement. `orders.rs` demonstrates SQL and
+//! lease validation and acknowledgement. `sql.rs` demonstrates SQL and
 //! `blob.rs` demonstrates Blob. This uses local fixtures, not service ingress.
 
 use std::{

@@ -21,7 +21,7 @@ cellule-host → cellule-app → cellule-runtime → cellule-ltx → cellule-sto
 | [cellule-store](../crates/cellule-store/README.md) | Provider-neutral object operations, conditional writes, retries, and error classification. | [Provider integration](../crates/cellule-store/docs/providers.md) |
 | [cellule-ltx](../crates/cellule-ltx/README.md) | Managed SQLite WAL capture, LTX objects, roots, and verified recovery. | [Upstream provenance](../crates/cellule-ltx/UPSTREAM.md) |
 | [cellule-runtime](../crates/cellule-runtime/README.md) | Cell actor, fencing, authority, request outcomes, receipts, and primitive execution. | [Runtime notes](../crates/cellule-runtime/docs/README.md) |
-| [cellule-app](../crates/cellule-app/README.md) | Application descriptors, module registration, and typed author handles. | [Orders example](../crates/cellule-app/examples/orders.rs) |
+| [cellule-app](../crates/cellule-app/README.md) | Application descriptors, module registration, and typed author handles. | [SQL example](../crates/cellule-app/examples/sql.rs) |
 | [cellule-host](../crates/cellule-host/README.md) | Node startup, admission, drain, and shutdown. | [Host lifecycle](../crates/cellule-host/docs/lifecycle.md) |
 | [cellule-peer-http](../crates/cellule-peer-http/README.md) | Optional peer transport and pinned mTLS. | Application-owned ingress in the [framework guide](framework.md). |
 
@@ -30,7 +30,7 @@ cellule-host → cellule-app → cellule-runtime → cellule-ltx → cellule-sto
 | Need | Source |
 | --- | --- |
 | Compile two Cell types; write KV and claim Queue work | [Basic example](../crates/cellule-app/examples/basic.rs) |
-| Commit SQL, read at a receipt, drain | [Orders example](../crates/cellule-app/examples/orders.rs) |
+| Commit SQL, read at a receipt, drain | [SQL example](../crates/cellule-app/examples/sql.rs) |
 | Stage and read Blob content | [Blob example](../crates/cellule-app/examples/blob.rs) |
 | Run a Workflow and supervised Activity | [Workflow example](../crates/cellule-app/examples/workflow.rs) |
 | Fire a Cron occurrence and deliver its Effect | [Schedules example](../crates/cellule-app/examples/schedules.rs) |

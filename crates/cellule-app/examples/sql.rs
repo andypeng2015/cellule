@@ -1,6 +1,6 @@
 //! Commit an order in one SQL Cell, then read it at its durable receipt.
 //!
-//! Run: `cargo run -p cellule-app --example orders --locked`
+//! Run: `cargo run -p cellule-app --example sql --locked`
 //!
 //!   OrdersApp -> descriptor: SQL schema, command and query IDs, Cell type
 //!   Local owner -> Orders Cell: catalog + fence + managed SQLite bootstrap
@@ -58,9 +58,7 @@ impl CellModule for Orders {
         static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: Self::NAME,
-            source_digest: Digest::from_bytes(
-                *blake3::hash(include_bytes!("orders.rs")).as_bytes(),
-            ),
+            source_digest: Digest::from_bytes(*blake3::hash(include_bytes!("sql.rs")).as_bytes()),
             retained_codes: &[],
             schema_min: 1,
             schema_max: 1,

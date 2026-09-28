@@ -24,5 +24,5 @@ sequenceDiagram
 A missing or lagging replica returns `ReplicaUnavailable` or `ReplicaBehind`;
 the client does not silently fall back to the owner. The host installs read
 replicas and the authenticated peer client. Application code sees only typed
-capabilities. Run the [orders example](../examples/orders.rs) for a command and
+capabilities. Run the [SQL example](../examples/sql.rs) for a command and
 visible read-back.

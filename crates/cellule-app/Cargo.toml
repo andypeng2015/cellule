@@ -41,8 +41,8 @@ name = "basic"
 path = "examples/basic.rs"
 
 [[example]]
-name = "orders"
-path = "examples/orders.rs"
+name = "sql"
+path = "examples/sql.rs"
 
 [[example]]
 name = "blob"

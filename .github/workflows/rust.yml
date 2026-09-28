@@ -50,12 +50,12 @@ jobs:
         run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
       - name: Test
         run: cargo test --workspace --all-features --locked
-      - name: Run orders example
-        run: cargo run -p cellule-app --example orders --locked
-      - name: Run attachments example
-        run: cargo run -p cellule-app --example attachments --locked
-      - name: Compile application descriptor example
-        run: cargo run -p cellule-app --example application_descriptor --locked
+      - name: Run SQL example
+        run: cargo run -p cellule-app --example sql --locked
+      - name: Run Blob example
+        run: cargo run -p cellule-app --example blob --locked
+      - name: Run basic example
+        run: cargo run -p cellule-app --example basic --locked
       - name: Create isolated RustFS bucket
         env:
           AWS_ACCESS_KEY_ID: cellule-ci

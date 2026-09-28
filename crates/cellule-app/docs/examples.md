@@ -13,7 +13,7 @@ modules + Cell types -> compiled descriptor -> catalog + fenced owner
 | Run | Primitives | What it demonstrates |
 | --- | --- | --- |
 | `cargo run -p cellule-app --example basic --locked` | KV, Queue | A scoped atomic setting write and receipt-bound read; send, claim, validate, and acknowledge one leased job. |
-| `cargo run -p cellule-app --example orders --locked` | SQL | Parameterized INSERT and SELECT in one Cell, with the write receipt as the read minimum. |
+| `cargo run -p cellule-app --example sql --locked` | SQL | Parameterized INSERT and SELECT in one Cell, with the write receipt as the read minimum. |
 | `cargo run -p cellule-app --example blob --locked` | Blob | Begin, stage one part, complete a Blob, then verify bytes and content type at the completion receipt. |
 | `cargo run -p cellule-app --example workflow --locked` | Workflow, Activities | Start a durable run, have an `ActivitySupervisor` validate and execute its activity, then read the completed state. |
 | `cargo run -p cellule-app --example schedules --locked` | Cron, Effects | Register a fixed-interval schedule, drive one due maintenance tick, deliver its effect through a signed local peer loopback, and count the destination row. |
@@ -27,7 +27,7 @@ sends `send-email`, claims a lease, checks that exact token against the owner,
 and acknowledges it. Real consumers perform idempotent external work between
 validation and acknowledgement because delivery is at least once.
 
-**[orders.rs](../examples/orders.rs)** declares a SQL migration and fixed
+**[sql.rs](../examples/sql.rs)** declares a SQL migration and fixed
 command/query IDs, provisions one Cell, then calls `SqlCell::batch` with
 parameterized values and a stable request identity. The returned receipt gates
 a query that checks the committed order total. The example drains the runtime
