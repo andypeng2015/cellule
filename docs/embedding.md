@@ -50,6 +50,31 @@ deadline before dispatch. A lost or invalid response remains an unknown outcome.
 The receiver and caller must not infer that a mutation failed merely because its
 HTTP response was lost.
 
+```mermaid
+sequenceDiagram
+    participant Client as Application client
+    participant Gateway as Ingress node
+    participant Owner as Fenced Cell owner
+    participant Store as Durable outcome ledger
+    Client->>Gateway: Command with stable request ID
+    Gateway->>Owner: Signed owner-routed request
+    Owner->>Store: Commit and publish outcome
+    Store-->>Owner: Durable proof
+    alt Response arrives
+        Owner-->>Gateway: Result and receipt
+        Gateway-->>Client: Result and receipt
+    else Response is lost
+        Gateway-->>Client: Outcome unknown
+        Client->>Gateway: Resolve the same request ID
+        Gateway->>Owner: Look up durable outcome
+        Owner-->>Gateway: Recorded result and receipt
+        Gateway-->>Client: Recorded result and receipt
+    end
+```
+
+Resolve an ambiguous response using the original request ID. Creating a new ID
+would ask the owner to execute a second command.
+
 ## Read replicas and delivery
 
 Use the [host's read-replica manager and recruitment API](../crates/cellule-host/README.md)

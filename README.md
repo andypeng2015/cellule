@@ -83,5 +83,7 @@ proof from provider and production evidence. The [release guide](docs/releasing.
 lists packaging and publication gates. [LTX attribution](crates/cellule-ltx/UPSTREAM.md)
 ships with the crate.
 
-The [original synthesis overview](docs/workspace-reference.md) remains available
-as historical context for the import.
+The [synthesis record](docs/synthesis.md), [verification report](docs/verification.md),
+and [dated performance evidence](crates/cellule-app/PERFORMANCE.md) preserve the
+import and qualification details. Their measured results describe the recorded
+revisions and environments; use the current guides above for new work.
