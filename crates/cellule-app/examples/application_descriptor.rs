@@ -1,12 +1,11 @@
-//! Compiles one application the way an author does.
+//! Declare a module and Cell type, then compile an application descriptor.
 //!
-//! Run with `cargo run -p cellule-app --example authoring`. A host takes the
-//! finished `CompiledApplication`; building it here keeps the documented
-//! authoring flow compiling against the published contract.
+//! Run with `cargo run -p cellule-app --example application_descriptor`.
+//! This example only describes the application; it does not start a Cell.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use cellule_app::{ApplicationBuilder, CellType, CompiledApplication};
+use cellule_app::{ApplicationBuilder, CellType};
 use cellule_runtime::cell::catalog::CatalogRole;
 use cellule_runtime::identity::{Digest, NamespaceId};
 use cellule_runtime::registry::{
@@ -14,13 +13,15 @@ use cellule_runtime::registry::{
     RegistryBuilder,
 };
 
-/// The module an application registers before a host can serve it.
+/// A module that owns the repository namespace.
 struct Repository;
 
-/// The namespace this module owns. A descriptor borrows its lists for the
-/// process, so they live in `static` items rather than in the initializer.
+const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);
+const SCHEMA: &str = "CREATE TABLE repositories (id INTEGER PRIMARY KEY, name TEXT NOT NULL)";
+
+// Module descriptors borrow their lists for the life of the process.
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
-    id: NamespaceId::from_bytes([2; 16]),
+    id: REPOSITORY_NAMESPACE,
     name: "repository",
     role: CatalogRole::Sql,
     shards: 1,
@@ -28,30 +29,27 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     dead_letter: None,
 }];
 
-/// The single statement that installs the module's schema.
-const MIGRATION_SQL: &str = "-- repository migration v1";
-
 impl CellModule for Repository {
     const NAME: &'static str = "repository";
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
+        static MIGRATIONS: OnceLock<[MigrationDescriptor; 1]> = OnceLock::new();
         static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
-            name: "repository",
-            source_digest: Digest::from_bytes([1; 32]),
+            name: Self::NAME,
+            source_digest: Digest::from_bytes(
+                *blake3::hash(include_bytes!("application_descriptor.rs")).as_bytes(),
+            ),
             retained_codes: &[],
             schema_min: 1,
             schema_max: 1,
-            // A module must install its own schema, and the registry pins each
-            // migration to the exact statement: the digest is its BLAKE3 hash.
-            migrations: Box::leak(
-                vec![MigrationDescriptor {
+            migrations: MIGRATIONS.get_or_init(|| {
+                [MigrationDescriptor {
                     version: 1,
-                    sql: MIGRATION_SQL,
-                    digest: Digest::from_bytes(*blake3::hash(MIGRATION_SQL.as_bytes()).as_bytes()),
+                    sql: SCHEMA,
+                    digest: Digest::from_bytes(*blake3::hash(SCHEMA.as_bytes()).as_bytes()),
                 }]
-                .into_boxed_slice(),
-            ),
+            }),
             commands: &[],
             queries: &[],
             workflow_definitions: &[],
@@ -60,8 +58,7 @@ impl CellModule for Repository {
         })
     }
 
-    /// Native bindings for this module's commands and queries live here. This
-    /// example registers none, so the module declares its namespace only.
+    /// This descriptor has no commands or queries to bind.
     fn register(self, _registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
         Ok(())
     }
@@ -71,20 +68,22 @@ fn main() -> cellule_runtime::Result<()> {
     let mut builder = ApplicationBuilder::new(
         "repository",
         BuildDescriptor {
-            source_revision: "authoring-example".into(),
-            cargo_lock_digest: Digest::from_bytes([3; 32]),
+            source_revision: "application-descriptor-example".into(),
+            cargo_lock_digest: Digest::from_bytes(
+                *blake3::hash(include_bytes!("../../../Cargo.lock")).as_bytes(),
+            ),
         },
     )?;
     builder.register(Repository)?;
     builder.cell_type(CellType::new(
         "repository",
         "repository",
-        NamespaceId::from_bytes([2; 16]),
+        REPOSITORY_NAMESPACE,
         CatalogRole::Sql,
         1,
     )?)?;
 
-    let application: Arc<CompiledApplication> = Arc::new(builder.finish()?);
+    let application = builder.finish()?;
     println!(
         "compiled {} with {} cell type(s), digest {:?}",
         application.name(),

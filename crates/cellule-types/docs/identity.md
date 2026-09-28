@@ -22,5 +22,5 @@ assert_ne!(a, BucketIdentity::local_unset());
 
 `StorageScope` carries repository and global prefixes plus source and scope
 identity. It limits views; it is not an owner lease or an authorization check.
-The embedding service validates scope and credentials before constructing a
+The application validates scope and credentials before constructing a
 store. See [cellule-store](../../cellule-store/docs/README.md) for transport.

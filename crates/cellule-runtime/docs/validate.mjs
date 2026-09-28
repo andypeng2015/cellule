@@ -73,7 +73,7 @@ rejects(blob, upload + `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(
 rejects(blob, `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), 0, NULL);`, /FOREIGN KEY constraint/);
 rejects(cron, `INSERT INTO cron_schedules VALUES(zeroblob(16), 0, X'', X'', 999, 0, 0, 1, 1, 0);`, /CHECK constraint/);
 
-// Only message contracts are intended: product HTTP APIs remain in the embedding service.
+// Only message contracts are intended: product HTTP APIs remain in the application.
 const peer = readFileSync(path.join(contracts, 'peer.proto'), 'utf8');
 assert(!/^\s*service\s/m.test(peer), 'private contract must not generate a public service');
 assert(!/\b(?:WorkflowDecision|WorkflowAction)\b/.test(peer), 'native decisions do not cross peer RPC');

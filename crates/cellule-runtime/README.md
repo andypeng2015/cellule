@@ -2,7 +2,7 @@
 
 Embedded Cell runtime: identities, fenced authority, one writer per Cell,
 transactional outcomes, exact-root publication, follower durability, placement,
-and distributed primitives. An embedding service owns HTTP, authentication, and
+and distributed primitives. An application owns HTTP, authentication, and
 provider construction.
 
 ```mermaid

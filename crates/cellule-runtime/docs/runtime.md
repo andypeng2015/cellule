@@ -6,15 +6,15 @@ runs the application callback; the actor owns the result gate and lifecycle.
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Actor
+    participant Owner as Cell actor
     participant SQLite
     participant Store
-    Client->>Actor: Typed command + request identity
-    Actor->>SQLite: Execute and store outcome atomically
-    SQLite-->>Actor: Committed WAL cut
-    Actor->>Store: Prepare immutable root or durable follower proof
-    Store-->>Actor: Authority CAS or quorum proof
-    Actor-->>Client: Committed output + receipt
+    Client->>Owner: Typed command + request identity
+    Owner->>SQLite: Execute and store outcome atomically
+    SQLite-->>Owner: Committed WAL cut
+    Owner->>Store: Prepare immutable root or durable follower proof
+    Store-->>Owner: Authority CAS or quorum proof
+    Owner-->>Client: Committed output + receipt
 ```
 
 | Phase | Owner | Invariant |

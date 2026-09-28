@@ -62,7 +62,7 @@ async fn spawn(node: usize, root: &str, sync: &Path) -> (ChildGuard, SocketAddr)
     let child = Command::new(env::current_exe().unwrap())
         .args([
             "--exact",
-            "reference_application::process_performance::fleet_process_role",
+            "process_performance::fleet_process_role",
             "--ignored",
             "--nocapture",
         ])

@@ -2,7 +2,7 @@
 
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 ## Navigate this reference
 
@@ -702,7 +702,7 @@ discarded.
 
 LTX CRC64 protects file structure and rolling database state. It is not a
 cryptographic authenticator. Crab manifests and Cell objects add BLAKE3 digests;
-the embedding service remains responsible for authenticating the manifest or
+the application remains responsible for authenticating the manifest or
 authority record that selects them.
 
 <a id="detail-16"></a>

@@ -1,9 +1,9 @@
-//! Embedded SQLite Cell runtime contracts for embedding services.
+//! Embedded SQLite Cell runtime contracts for applications.
 //!
 //! This crate owns reusable Cell identities, control records, transitions,
 //! runtime schema installation and the single-Cell command/pending-publication
 //! executor. HTTP, authentication and provider construction remain product
-//! concerns of the embedding service.
+//! concerns of the application.
 
 #![deny(missing_docs)]
 // Production panics can abandon accepted work and persistence resources; tests

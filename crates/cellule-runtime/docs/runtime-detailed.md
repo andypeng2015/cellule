@@ -93,7 +93,7 @@ runtime admission and authority CAS; the framework's default runtime resolver
 only looks up existing ownership. Apply admission backpressure after the local
 resolver so the same request budgets cover local and remote invocations.
 
-An embedding service can opt into `CellClient::with_admission_backpressure`
+An application can opt into `CellClient::with_admission_backpressure`
 when its request budget permits waiting for owner capacity. Client clones share
 finite call-count and encoded-input byte budgets; exhausting either still fails
 immediately. Mailbox operations acquire per-Cell FIFO semaphores using the

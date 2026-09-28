@@ -1,7 +1,7 @@
 //! Additive application code, retained clients, and exact-root recovery.
 
 use super::*;
-use crate::reference_application::performance_fixture::rustfs_store;
+use crate::performance_fixture::rustfs_store;
 use cellule_host::CellNodeBuilder;
 use cellule_runtime::node::lease::NodeLeaseGuard;
 use cellule_runtime::registry::{Query, QueryContext, RetainedCodeDescriptor};

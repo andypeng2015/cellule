@@ -89,7 +89,7 @@ pub trait LtxTelemetry: Send + Sync {
 /// Rechecks host disk pressure after full-job scratch admission.
 ///
 /// `reserved_bytes` is the process-wide scratch reservation, including the
-/// current job. An embedding service can combine it with other local-disk
+/// current job. An application can combine it with other local-disk
 /// reservations and an operator reserve before allowing remote downloads.
 #[cfg(feature = "replica")]
 pub trait ScratchMonitor: Send + Sync {

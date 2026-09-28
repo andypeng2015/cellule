@@ -1,4 +1,4 @@
-//! The typed-handle commit path through the reference application.
+//! The typed-handle commit path through the test application.
 
 use super::performance_fixture::PerfFixture;
 use crate::*;
@@ -334,7 +334,7 @@ fn typed_capability_surface<A: CellApplication>(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reference_application_uses_typed_handle_for_a_real_commit() {
+async fn typed_application_uses_typed_handle_for_a_real_commit() {
     let application = Arc::new(compiled());
     let tenant = TenantId::from_bytes([21; 16]);
     let application_id = cellule_runtime::ApplicationId::from_bytes([22; 16]);

@@ -511,7 +511,7 @@ impl Host {
 
     /// Shares memory admission for capture, recovery and compaction jobs.
     ///
-    /// One permit represents the embedding service's fixed per-job dirty-memory
+    /// One permit represents the application's fixed per-job dirty-memory
     /// reservation. The permit follows dispatched work after caller cancellation.
     #[cfg(feature = "replica")]
     #[must_use]

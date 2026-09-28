@@ -1,8 +1,8 @@
 # Embed Cellule in a service
 
-Cellule supplies reusable state and lifecycle mechanics. An embedding service
+Cellule supplies reusable state and lifecycle mechanics. An application
 owns ingress, authorization, cloud credentials, deployment configuration, and
-fleet policy. Start with the [orders example and reference application](quickstart.md).
+fleet policy. Start with the [orders example and application integration suite](quickstart.md).
 
 ## Assemble one node
 
@@ -27,7 +27,7 @@ Before admitting traffic, run `cellule_store::probe_storage` on a fresh private
 prefix in the configured store. Inspect `StorageProbeReport::passed` and
 `failed_checks` to reject providers that cannot honor conditional create,
 ETag update, stale-ETag rejection, and exact ranged reads. Readiness policy stays
-in the embedding service; the host does not implicitly run a credentialed probe.
+in the application; the host does not implicitly run a credentialed probe.
 
 `build_unleased_for_maintenance()` is for bounded offline work. It is not a
 serving-node initialization path.
@@ -50,6 +50,31 @@ deadline before dispatch. A lost or invalid response remains an unknown outcome.
 The receiver and caller must not infer that a mutation failed merely because its
 HTTP response was lost.
 
+```mermaid
+sequenceDiagram
+    participant Client as Application client
+    participant Gateway as Ingress node
+    participant Owner as Fenced Cell owner
+    participant Store as Durable outcome ledger
+    Client->>Gateway: Command with stable request ID
+    Gateway->>Owner: Signed owner-routed request
+    Owner->>Store: Commit and publish outcome
+    Store-->>Owner: Durable proof
+    alt Response arrives
+        Owner-->>Gateway: Result and receipt
+        Gateway-->>Client: Result and receipt
+    else Response is lost
+        Gateway-->>Client: Outcome unknown
+        Client->>Gateway: Resolve the same request ID
+        Gateway->>Owner: Look up durable outcome
+        Owner-->>Gateway: Recorded result and receipt
+        Gateway-->>Client: Recorded result and receipt
+    end
+```
+
+Resolve an ambiguous response using the original request ID. Creating a new ID
+would ask the owner to execute a second command.
+
 ## Read replicas and delivery
 
 Use the [host's read-replica manager and recruitment API](../crates/cellule-host/README.md)
@@ -58,10 +83,10 @@ Native-memory reservations for snapshots are separate from writer capacity;
 configure `SqlWorkerPool::with_native_memory_limit` explicitly. Queries do not
 activate missing readers or bypass their admission policy.
 
-Activities and Effects retain their runtime supervisors. The embedding service
+Activities and Effects retain their runtime supervisors. The application
 owns which supervisors to start, their schedules, and their cancellation through
 the node task group. The old framework-wide automatic delivery loop is superseded
-by the current host lifecycle; see [the synthesis ledger](synthesis.md).
+by the current host lifecycle.
 
 ## Drain and shutdown
 

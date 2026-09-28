@@ -1,4 +1,4 @@
-//! Three public `CellNode` hosts exercising the reference application's client contract.
+//! Three public `CellNode` hosts exercising the test application's client contract.
 
 use super::fleet::{GatewayStats, peer_round_trip, start_gateway_peer_server, start_peer_server};
 use super::performance::report_samples;

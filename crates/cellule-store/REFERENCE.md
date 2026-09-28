@@ -1,6 +1,6 @@
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 # cellule-store
 
@@ -22,7 +22,7 @@ assert_eq!(&body[..], b"state");
 # }
 ```
 
-The caller supplies a validated object-store prefix. `cellule-ltx` defines the Cell object layout, and `cellule-runtime` decides when a proposed root becomes authoritative. The embedding service resolves credentials and constructs cloud providers. `build_explicit_store` is available when that service wants Cellule's provider builder.
+The caller supplies a validated object-store prefix. `cellule-ltx` defines the Cell object layout, and `cellule-runtime` decides when a proposed root becomes authoritative. The application resolves credentials and constructs cloud providers. `build_explicit_store` is available when the application wants Cellule's provider builder.
 
 ## Guarantees
 

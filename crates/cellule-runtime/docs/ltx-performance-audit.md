@@ -423,8 +423,7 @@ relocation, effective index tree `4a152bac8a494fb16ae617a4889c988cb32d53b7`.
 The staged patch, binary/host/provider identities, all six action distributions
 per run and log hashes are retained in `public-host-rustfs-20260926/` beneath
 this checkout's external target. These results do not qualify an unmodified PR
-checkout or resolve the relocation's inventory approval. The earlier
-[2026-09-25 measurements](../../cellule-app/performance/2026-09-25-public-host-rustfs.md)
+checkout or resolve the relocation's inventory approval. Earlier measurements
 used a different source and RustFS environment; this is not a controlled
 before/after comparison. Recovery times cover fixture fencing and takeover,
 not production failure detection or lease-expiry latency.

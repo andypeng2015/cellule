@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the built reference application on 3/5/10/20 constrained Compose nodes."""
+"""Run the built application integration tests on constrained Compose nodes."""
 
 from __future__ import annotations
 

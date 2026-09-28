@@ -76,9 +76,10 @@ This is a pre-release hard cut to Crab's feature set.
 Reintroducing these APIs requires integration with the current actor, capacity,
 maintenance, registry, and host contracts.
 
-The orders example is adapted to the current public API. Other old standalone
-examples are consolidated into the current reference application; authoring and
-orders are the explicitly registered Cargo examples.
+The orders example was adapted to the current public API during the import.
+The current workspace also registers the application descriptor and attachments
+examples; the [quickstart](quickstart.md) shows all three. The old reference
+application now lives in the `integration` test suite.
 
 Catalog layout, descriptors, and authority behavior have evolved since the old
 extraction. This refresh does not assert that an old deployment can open its

@@ -4,14 +4,14 @@ case "${1:-}" in
   node) role="node-${CELLULE_PERF_PROCESS_NODE:?}"; selected=process_performance::fleet_process_role ;;
   driver) role=driver; selected=process_performance::reference_compose_fleet_end_to_end_performance ;;
   scale) role=driver; selected=process_scaling::reference_compose_reader_scaling ;;
-  rollout) role=rollout; selected=public_host::rollout::three_node_host_rustfs_additive_code_rollout ;;
+  rollout) role=rollout; selected=host::rollout::three_node_host_rustfs_additive_code_rollout ;;
   entities) role=entities; selected=entities::hosts::entity_ledgers_are_isolated_across_three_rustfs_hosts ;;
   entity-node) role="node-${CELLULE_PERF_PROCESS_NODE:?}"; selected=entities::process::entity_process_node ;;
   entity-scale) role=driver; selected=entities::process::driver::entity_process_scaling ;;
   *) printf 'usage: run.sh node|driver|scale|rollout|entities|entity-node|entity-scale\n' >&2; exit 2 ;;
 esac
 binary=
-for candidate in /target/release/deps/reference_application-*; do
+for candidate in /target/release/deps/integration-*; do
   if [ -f "$candidate" ] && [ -x "$candidate" ]; then
     test -z "$binary" || { printf 'multiple test binaries; use a fresh target\n' >&2; exit 1; }
     binary=$candidate
@@ -33,7 +33,7 @@ test "$quota" -eq "$period"
 test "$(cat /sys/fs/cgroup/memory.max)" -eq 1073741824
 test "$(cat /sys/fs/cgroup/memory.swap.max)" -eq 0
 set +e
-"$binary" --ignored --exact "reference_application::$selected" --nocapture \
+"$binary" --ignored --exact "$selected" --nocapture \
   > "/evidence/$role.log" 2>&1
 result=$?
 set -e

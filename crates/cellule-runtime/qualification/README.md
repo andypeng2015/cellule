@@ -45,7 +45,7 @@ freshness checks. No local smoke substitutes for those inputs.
 | --- | --- |
 | Pure coordination model | [`model/README.md`](../model/README.md) |
 | Runtime integration suites | [`tests/qualification.rs`](../tests/qualification.rs) |
-| Public typed end-to-end | [`cellule-app` reference suite](../../cellule-app/tests/reference_application.rs) |
+| Public typed end-to-end | [`cellule-app` integration suite](../../cellule-app/tests/integration.rs) |
 | One-vCPU sparse worker diagnostic | [Worker profile](worker-profile.md) |
 | Application process/reader scenarios | [`cellule-app` performance guide](../../cellule-app/PERFORMANCE.md) |
 

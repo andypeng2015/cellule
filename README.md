@@ -2,7 +2,7 @@
 
 Cellule is an embedded Rust framework for distributed, SQLite-backed Cells.
 Each Cell has one fenced writer, a durable outcome ledger, immutable LTX
-history, and an exact recovery root. An embedding service supplies ingress,
+history, and an exact recovery root. An application supplies ingress,
 authorization, credentials, and deployment policy.
 
 ```mermaid
@@ -37,15 +37,15 @@ The peer adapter uses runtime contracts without moving HTTP into lower layers.
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Actor as Cell owner
+    participant Owner as Cell owner
     participant SQL as SQLite
     participant Store as Object store
-    Client->>Actor: Typed command and stable request ID
-    Actor->>SQL: Commit mutation and outcome together
-    SQL-->>Actor: WAL cut
-    Actor->>Store: Publish exact root or follower proof
-    Store-->>Actor: Durable proof
-    Actor-->>Client: Output and receipt
+    Client->>Owner: Typed command and stable request ID
+    Owner->>SQL: Commit mutation and outcome together
+    SQL-->>Owner: WAL cut
+    Owner->>Store: Publish exact root or follower proof
+    Store-->>Owner: Durable proof
+    Owner-->>Client: Output and receipt
 ```
 
 Recovery selects only the authority-pinned root and verifies required bytes.
@@ -64,6 +64,11 @@ cargo run -p cellule-app --example orders --locked
 cargo test --workspace --all-features --locked
 ```
 
+The [application descriptor](crates/cellule-app/examples/application_descriptor.rs)
+example shows module and Cell topology registration. The
+[attachments example](crates/cellule-app/examples/attachments.rs) shows a Blob
+upload and receipt-bound read.
+
 For topology declarations and typed clients, start with the
 [quickstart](docs/quickstart.md) and [application guide](crates/cellule-app/docs/README.md).
 For a serving node, read [embedding](docs/embedding.md) and
@@ -78,5 +83,7 @@ proof from provider and production evidence. The [release guide](docs/releasing.
 lists packaging and publication gates. [LTX attribution](crates/cellule-ltx/UPSTREAM.md)
 ships with the crate.
 
-The [original synthesis overview](docs/workspace-reference.md) remains available
-as historical context for the import.
+The [synthesis record](docs/synthesis.md), [verification report](docs/verification.md),
+and [dated performance evidence](crates/cellule-app/PERFORMANCE.md) preserve the
+import and qualification details. Their measured results describe the recorded
+revisions and environments; use the current guides above for new work.

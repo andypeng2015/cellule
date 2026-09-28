@@ -39,7 +39,8 @@ assert!(orders_topology().is_ok());
 ```
 
 ```sh
-cargo run -p cellule-app --example authoring --locked
+cargo run -p cellule-app --example application_descriptor --locked
 cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example attachments --locked
 cargo test -p cellule-app --locked
 ```

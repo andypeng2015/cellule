@@ -1,4 +1,4 @@
-//! The reference application every suite module compiles and drives.
+//! The test application every suite module compiles and drives.
 
 use crate::*;
 

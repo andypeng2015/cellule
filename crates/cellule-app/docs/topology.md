@@ -20,5 +20,5 @@ flowchart TD
 
 Changing a stable namespace, role, partition scheme, or descriptor changes
 routing and persisted identity. Treat it as a versioned application change.
-The [authoring example](../examples/authoring.rs) compiles one descriptor and
+The [application descriptor example](../examples/application_descriptor.rs) compiles one descriptor and
 prints its digest.

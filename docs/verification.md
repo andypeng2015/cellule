@@ -55,8 +55,11 @@ The exact smoke selector is:
 reference_application::process_performance::reference_balanced_three_process_fleet_end_to_end_performance
 ```
 
-The Rust workflow now lists and asserts this selector before running it, so a
-renamed test cannot silently produce a successful zero-test smoke run.
+That selector records the test name at the import revision. The current suite is
+named `integration`; its corresponding selector is
+`process_performance::reference_balanced_three_process_fleet_end_to_end_performance`.
+The Rust workflow asserts the current selector before running it, so a rename
+cannot silently produce a successful zero-test smoke run.
 
 ## Scope of evidence
 

@@ -1,8 +1,8 @@
 //! Scheduled arrivals retain overload and verify every resulting Cell ledger.
 
 use super::*;
-use crate::reference_application::fleet::{balancer_round_trip, start_balancer};
-use crate::reference_application::process_performance::Controller;
+use crate::fleet::{balancer_round_trip, start_balancer};
+use crate::process_performance::Controller;
 use cellule_runtime::{
     Receipt,
     cell::executor::{Resolution, StoredOutcome},

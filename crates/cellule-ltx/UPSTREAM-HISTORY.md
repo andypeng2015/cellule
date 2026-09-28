@@ -91,7 +91,7 @@ commit; it is not a runtime or compatibility contract.
   observation, and fresh local session claim.
 - No background daemon, provider URL parser, credential loader, HTTP service,
   retention loop, or scheduler is included.
-- Local APIs are synchronous. The embedding service supplies its database thread
+- Local APIs are synchronous. The application supplies its database thread
   or bounded blocking executor.
 
 ### Exact state selection

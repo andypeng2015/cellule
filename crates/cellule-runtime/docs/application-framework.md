@@ -45,7 +45,7 @@ distributed relational database.
 
 [Back to the Cell runtime index](README.md)
 
-[`crates/cellule-app/examples/authoring.rs`](../../cellule-app/examples/authoring.rs)
+[`crates/cellule-app/examples/application_descriptor.rs`](../../cellule-app/examples/application_descriptor.rs)
 is the minimal compile-checked version of the flow below: one module with its
 migration, one namespace, one cell type, and a finished `CompiledApplication`.
 The prose snippets stay illustrative; the example is what CI compiles.

@@ -58,7 +58,7 @@ cargo test --workspace --locked
 cargo test -p cellule-ltx --features replica --locked
 ```
 
-Start with the [orders example and reference application guide](../docs/quickstart.md).
+Start with the [orders example and application integration guide](../docs/quickstart.md).
 The orders example commits and reads a published SQL value. The reference
 application exercises SQL, KV, Blob, Queue, Workflow/Activity, and Cron/Effect,
 then restores published state under a successor owner. See [architecture](../docs/architecture.md),
@@ -68,13 +68,9 @@ LTX retains its [upstream attribution](../crates/cellule-ltx/UPSTREAM.md) and li
 
 ## Integration
 
-Cellule is developed and tested as a separate workspace. An embedding service supplies its own storage provider, application modules, network transport, and authentication. The architecture document defines the crate boundaries, and the [runtime design notes](../crates/cellule-runtime/docs/README.md) carry the mechanics that were synthesized from Crab.
+Cellule is developed and tested as a separate workspace. A service supplies its own storage provider, application modules, network transport, and authentication. The architecture document defines the crate boundaries, and the [runtime design notes](../crates/cellule-runtime/docs/README.md) carry the mechanics that were synthesized from Crab.
 
 The [primitive roadmap](../docs/roadmap.md) records the supported framework surface and remaining integration and qualification work.
-
-The [Crab synthesis ledger](../docs/synthesis.md) records the synced revision, mapping,
-and adaptations. The [verification report](../docs/verification.md) records the
-checks performed for this refresh.
 
 ## Contribute
 

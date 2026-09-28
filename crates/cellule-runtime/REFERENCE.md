@@ -1,13 +1,13 @@
 > Detailed reference preserved from the original Cellule synthesis.
 > The [current crate guide](README.md) is the entry point; Crab product
-> examples below describe the former embedding service.
+> examples below describe the former application.
 
 # cellule-runtime
 
-Embedded SQLite Cell runtime for embedding services: Cell identities, control/CAS
+Embedded SQLite Cell runtime for applications: Cell identities, control/CAS
 authority, one single-writer actor per Cell, schema installation, exact-root
 LTX publication, follower durability, fleet placement, and qualification
-receipts. The embedding service owns HTTP ingress, authentication, and provider
+receipts. The application owns HTTP ingress, authentication, and provider
 construction.
 
 An opt-in library read path can open an exact S3-rooted, read-only Cell view
