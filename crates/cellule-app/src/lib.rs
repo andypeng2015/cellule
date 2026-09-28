@@ -4,23 +4,52 @@
 //! deterministic topology descriptor. Node lifecycle, storage providers,
 //! authority and HTTP policy remain outside this boundary.
 
+#![deny(missing_docs)]
+// Production panics can abandon accepted work and persistence resources; tests
+// retain assertions while runtime paths propagate typed errors.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::{marker::PhantomData, sync::Arc};
 
-use cellule_runtime::{
-    ApplicationId, BlobArtifactStore, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole,
-    CellClient, CellModule, CellTarget, Command, Committed, CronModule, CronNamespace, Digest,
-    EffectModule, EffectSource, Error, InvocationError, KvModule, KvNamespace, NamespaceId,
-    Observed, PendingMutation, PreparedCommand, Query, QueueModule, QueueNamespace, Registry,
-    RegistryBuilder, Resolution, Result, SqlCell, SqlModule, TenantId, WorkflowActivities,
-    WorkflowActivityModule, WorkflowModule, WorkflowNamespace, partition_for_shard,
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::executor::Resolution;
+use cellule_runtime::client::{
+    CellClient, Committed, InvocationError, Observed, PendingMutation, PreparedCommand,
 };
+use cellule_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard,
+};
+use cellule_runtime::primitives::blob::{BlobArtifactStore, BlobModule, BlobNamespace};
+use cellule_runtime::primitives::cron::{CronModule, CronNamespace};
+use cellule_runtime::primitives::effects::{EffectModule, EffectSource};
+use cellule_runtime::primitives::kv::{KvModule, KvNamespace};
+use cellule_runtime::primitives::queue::{QueueModule, QueueNamespace};
+use cellule_runtime::primitives::sql::{SqlCell, SqlModule};
+use cellule_runtime::primitives::workflow::{
+    WorkflowActivities, WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
+};
+use cellule_runtime::registry::{
+    BuildDescriptor, CellModule, Command, Query, Registry, RegistryBuilder,
+};
+use cellule_runtime::{Error, Result};
 
 const DESCRIPTOR_MAGIC: &[u8] = b"cellule.application.v1\0";
 const MAX_APPLICATION_NAME_BYTES: usize = 128;
 const MAX_CELL_TYPES: usize = 128;
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
-const MAX_PARTITION_VERSION: u32 = 2;
-const UUID_PARTITION_VERSION: u32 = 2;
+const MAX_PARTITION_VERSION: u32 = 3;
+const ENTITY_PARTITION_VERSION: u32 = 2;
+const UUID_PARTITION_VERSION: u32 = 3;
+const ENTITY_PARTITION_PREFIX: u8 = 1;
 
 /// One application-owned Cell topology declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,22 +91,9 @@ impl CellType {
         Ok(cell_type)
     }
 
-    /// Declares one SQL Cell per canonical 16-byte UUID partition.
-    ///
-    /// This changes only this Cell type's persisted descriptor; existing
-    /// fixed-shard descriptors retain their original bytes.
-    pub fn entity_uuid(
-        module: &'static str,
-        name: &'static str,
-        namespace: NamespaceId,
-    ) -> Result<Self> {
-        let mut cell_type = Self::new(module, name, namespace, CatalogRole::Sql, 1)?;
-        cell_type.partition_version = UUID_PARTITION_VERSION;
-        cell_type.validate()?;
-        Ok(cell_type)
-    }
-
     /// Replaces the declared application limits without changing stable identity.
+    ///
+    /// Database limits must be at least 512 bytes and capture limits at least 128 bytes.
     pub fn with_limits(
         mut self,
         database_limit_bytes: u64,
@@ -87,6 +103,31 @@ impl CellType {
         self.capture_limit_bytes = capture_limit_bytes;
         self.validate()?;
         Ok(self)
+    }
+
+    /// Selects stable entity partitions instead of fixed shards.
+    ///
+    /// The namespace descriptor must declare one shard. The application
+    /// derives one target per entity with [`Self::entity_partition`].
+    pub fn with_entity_partitions(mut self) -> Result<Self> {
+        self.partition_version = ENTITY_PARTITION_VERSION;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Declares one SQL Cell per canonical 16-byte UUID partition.
+    ///
+    /// UUID partitions use a distinct descriptor version from the 33-byte
+    /// entity digest mode and retain the UUID bytes as the Cell partition.
+    pub fn entity_uuid(
+        module: &'static str,
+        name: &'static str,
+        namespace: NamespaceId,
+    ) -> Result<Self> {
+        let mut cell_type = Self::new(module, name, namespace, CatalogRole::Sql, 1)?;
+        cell_type.partition_version = UUID_PARTITION_VERSION;
+        cell_type.validate()?;
+        Ok(cell_type)
     }
 
     /// Replaces the schema range while retaining the stable Cell identity.
@@ -121,25 +162,75 @@ impl CellType {
         self.role
     }
 
-    /// Returns the fixed shard count.
+    /// Returns the fixed shard count, or one for an entity Cell type.
     #[must_use]
     pub const fn shards(&self) -> u32 {
         self.shards
     }
 
-    /// Maps one bounded application scope to its stable shard number.
+    /// Returns the database ceiling declared for each Cell of this type.
+    #[must_use]
+    pub const fn database_limit_bytes(&self) -> u64 {
+        self.database_limit_bytes
+    }
+
+    /// Returns the capture ceiling declared for each Cell of this type.
+    #[must_use]
+    pub const fn capture_limit_bytes(&self) -> u64 {
+        self.capture_limit_bytes
+    }
+
+    /// Maps one bounded application scope to its stable fixed shard number.
     pub fn shard_for_scope(&self, scope: &[u8]) -> Result<u32> {
-        if self.partition_version == UUID_PARTITION_VERSION {
-            return Err(Error::Identity("UUID Cell type has no fixed shard"));
+        if self.partition_version != 1 {
+            return Err(Error::Identity("entity Cell type has no fixed shard"));
         }
         cellule_runtime::shard_for_scope(self.namespace, scope, self.shards)
     }
 
-    /// Returns the canonical partition bytes for one application scope.
+    /// Returns the canonical fixed-shard partition for one application scope.
     pub fn partition_for_scope(&self, scope: &[u8]) -> Result<[u8; 4]> {
         Ok(cellule_runtime::partition_for_shard(
             self.shard_for_scope(scope)?,
         ))
+    }
+
+    /// Derives the canonical partition bytes for one entity identity.
+    ///
+    /// The scope must be nonempty and at most 1,024 bytes. Its digest, not the
+    /// raw identity, enters the catalog partition key.
+    pub fn entity_partition(&self, scope: &[u8]) -> Result<[u8; 33]> {
+        if self.partition_version != ENTITY_PARTITION_VERSION {
+            return Err(Error::Identity(
+                "Cell type does not use hashed entity partitions",
+            ));
+        }
+        if scope.is_empty() || scope.len() > 1_024 {
+            return Err(Error::Identity("invalid entity scope length"));
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab.entity.partition.v1\0");
+        hasher.update(self.namespace.as_bytes());
+        hasher.update(&(scope.len() as u32).to_be_bytes());
+        hasher.update(scope);
+        let mut partition = [0_u8; 33];
+        partition[0] = ENTITY_PARTITION_PREFIX;
+        partition[1..].copy_from_slice(hasher.finalize().as_bytes());
+        Ok(partition)
+    }
+
+    fn valid_partition(&self, partition: &[u8]) -> bool {
+        if self.partition_version == ENTITY_PARTITION_VERSION {
+            return partition.len() == 33 && partition[0] == ENTITY_PARTITION_PREFIX;
+        }
+        if self.partition_version == UUID_PARTITION_VERSION {
+            return canonical_uuid_partition(partition);
+        }
+        let Ok(shard) = <[u8; 4]>::try_from(partition) else {
+            return false;
+        };
+        let shard = u32::from_be_bytes(shard);
+        shard < self.shards && partition_for_shard(shard).as_slice() == partition
     }
 
     fn validate(&self) -> Result<()> {
@@ -150,12 +241,13 @@ impl CellType {
             || !self.shards.is_power_of_two()
             || self.partition_version == 0
             || self.partition_version > MAX_PARTITION_VERSION
+            || (self.partition_version == ENTITY_PARTITION_VERSION && self.shards != 1)
             || (self.partition_version == UUID_PARTITION_VERSION
                 && (self.role != CatalogRole::Sql || self.shards != 1))
             || self.schema_min == 0
             || self.schema_min > self.schema_max
-            || self.database_limit_bytes == 0
-            || self.capture_limit_bytes == 0
+            || self.database_limit_bytes < 512
+            || self.capture_limit_bytes < 128
         {
             return Err(Error::Registry("invalid Cell type declaration"));
         }
@@ -306,8 +398,12 @@ impl CompiledApplication {
 
 /// Trait implemented by a statically linked application root.
 pub trait CellApplication: Send + Sync + 'static {
+    /// Stable application name carried into the compiled release descriptor.
     const NAME: &'static str;
 
+    /// Registers every module, namespace, and relationship this application
+    /// exposes. The builder rejects a registration that does not match the
+    /// compiled function bindings.
     fn register(builder: &mut ApplicationBuilder) -> Result<()>;
 
     /// Compiles this application using deterministic build evidence.
@@ -316,6 +412,15 @@ pub trait CellApplication: Send + Sync + 'static {
         Self::register(&mut builder)?;
         builder.finish()
     }
+}
+
+/// Stable key encoding for one generated Cell accessor.
+///
+/// Implementations must return the same bounded bytes for the same logical key
+/// across compatible releases; changing them moves the key to another Cell.
+pub trait CellKey {
+    /// Returns the stored canonical bytes used by the declared partition function.
+    fn canonical_bytes(&self) -> &[u8];
 }
 
 /// Tenant/application-bound typed capability over an already-started client.
@@ -339,22 +444,46 @@ impl<A> Clone for ApplicationHandle<A> {
     }
 }
 
-impl<A> ApplicationHandle<A> {
-    /// Binds a compiled application to one tenant and application identity.
-    #[must_use]
+impl<A: CellApplication> ApplicationHandle<A> {
+    /// Binds a compiled application and matching client to one tenant and application identity.
+    ///
+    /// Returns an error before any invocation when the author type or client
+    /// registry does not match the hosted application artifact.
     pub fn new(
         client: CellClient,
         compiled: Arc<CompiledApplication>,
         tenant: TenantId,
         application: ApplicationId,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        if compiled.name() != A::NAME {
+            return Err(Error::Registry(
+                "application type differs from compiled application",
+            ));
+        }
+        if client.registry_digest() != compiled.registry.release_digest() {
+            return Err(Error::Registry(
+                "client registry differs from compiled application",
+            ));
+        }
+        Ok(Self {
             client,
             tenant,
             application,
             compiled,
             marker: PhantomData,
-        }
+        })
+    }
+
+    /// Returns an application capability with an explicit typed-query read policy.
+    ///
+    /// Replica policy requires host-configured readers and never falls back to
+    /// owner reads. Commands, outcome resolution, streams and primitive lease
+    /// validation retain owner order.
+    #[must_use]
+    pub fn with_read_policy(&self, policy: cellule_runtime::client::ReadPolicy) -> Self {
+        let mut handle = self.clone();
+        handle.client = handle.client.with_read_policy(policy);
+        handle
     }
 
     /// Returns a handle whose Blob capability uses the configured object store.
@@ -369,6 +498,30 @@ impl<A> ApplicationHandle<A> {
     #[must_use]
     pub fn compiled(&self) -> &CompiledApplication {
         &self.compiled
+    }
+
+    /// Derives a scoped target using the declared partition topology.
+    pub fn target_for_scope(&self, namespace: NamespaceId, scope: &[u8]) -> Result<CellTarget> {
+        let cell_type = self
+            .compiled
+            .cell_types
+            .iter()
+            .find(|cell_type| cell_type.namespace == namespace)
+            .ok_or(Error::Registry("namespace is not declared by application"))?;
+        if cell_type.partition_version == ENTITY_PARTITION_VERSION {
+            let partition = cell_type.entity_partition(scope)?;
+            return CellTarget::new(self.tenant, self.application, namespace, &partition);
+        }
+        if cell_type.partition_version == UUID_PARTITION_VERSION {
+            if !canonical_uuid_partition(scope) {
+                return Err(Error::Identity(
+                    "Cell target UUID partition is not canonical",
+                ));
+            }
+            return CellTarget::new(self.tenant, self.application, namespace, scope);
+        }
+        let partition = cell_type.partition_for_scope(scope)?;
+        CellTarget::new(self.tenant, self.application, namespace, &partition)
     }
 
     /// Executes one statically typed command after enforcing application scope.
@@ -426,9 +579,9 @@ impl<A> ApplicationHandle<A> {
         self.client.resolve(pending).await
     }
 
-    /// Returns the typed KV capability for a compiled KV module.
+    /// Returns the typed KV capability for a compiled fixed-shard KV module.
     pub fn kv<M: KvModule>(&self, namespace: NamespaceId) -> Result<KvNamespace<M>> {
-        self.validate_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
+        self.validate_sharded_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
         KvNamespace::new(
             self.client.clone(),
             self.tenant,
@@ -444,33 +597,33 @@ impl<A> ApplicationHandle<A> {
         SqlCell::new(self.client.clone(), target)
     }
 
-    /// Returns the typed Blob capability for a compiled Blob module.
+    /// Returns the typed Blob capability for a compiled fixed-shard Blob module.
     pub fn blob<M: BlobModule>(&self) -> Result<BlobNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Blob)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Blob)?;
         BlobNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Queue capability for a compiled Queue module.
+    /// Returns the typed Queue capability for a compiled fixed-shard Queue module.
     pub fn queue<M: QueueModule>(&self) -> Result<QueueNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Queue)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Queue)?;
         QueueNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Cron capability for a compiled Cron module.
+    /// Returns the typed Cron capability for a compiled fixed-shard Cron module.
     pub fn cron<M: CronModule>(&self) -> Result<CronNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Cron)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Cron)?;
         CronNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Workflow capability for a compiled Workflow module.
+    /// Returns the typed Workflow capability for a compiled fixed-shard Workflow module.
     pub fn workflow<M: WorkflowModule>(&self) -> Result<WorkflowNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
         WorkflowNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the native activity capability for one compiled Workflow module.
+    /// Returns the native activity capability for one compiled fixed-shard Workflow module.
     pub fn activities<M: WorkflowActivityModule>(&self) -> Result<WorkflowActivities<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
         if !self.compiled.registry.has_activity_runner(M::NAMESPACE) {
             return Err(Error::Registry("activity runner is not registered"));
         }
@@ -479,7 +632,7 @@ impl<A> ApplicationHandle<A> {
 
     /// Returns the source effect capability for one explicitly selected Cell.
     ///
-    /// Effects are emitted by commands through [`cellule_runtime::CommandContext::emit_effect`];
+    /// Effects are emitted by commands through [`cellule_runtime::registry::CommandContext::emit_effect`];
     /// this capability is for claiming and acknowledging the resulting source
     /// ledger. The destination still owns external idempotency.
     pub fn effects<M: EffectModule>(&self, target: CellTarget) -> Result<EffectSource<M>> {
@@ -504,25 +657,10 @@ impl<A> ApplicationHandle<A> {
         else {
             return Err(Error::Registry("namespace is not declared by application"));
         };
-        if cell_type.partition_version == UUID_PARTITION_VERSION {
-            if !canonical_uuid_partition(target.partition()) {
-                return Err(Error::Identity(
-                    "Cell target UUID partition is not canonical",
-                ));
-            }
-        } else {
-            let shard = target
-                .partition()
-                .try_into()
-                .map(u32::from_be_bytes)
-                .map_err(|_| Error::Identity("Cell target partition is not canonical"))?;
-            if shard >= cell_type.shards
-                || partition_for_shard(shard).as_slice() != target.partition()
-            {
-                return Err(Error::Identity(
-                    "Cell target partition is outside the declared shard range",
-                ));
-            }
+        if !cell_type.valid_partition(target.partition()) {
+            return Err(Error::Identity(
+                "Cell target partition is outside the declared topology",
+            ));
         }
         Ok(())
     }
@@ -532,12 +670,29 @@ impl<A> ApplicationHandle<A> {
         self.compiled.validate_module(target.namespace(), module)
     }
 
-    fn validate_namespace(
+    fn validate_sharded_namespace(
         &self,
         namespace: NamespaceId,
         module: &'static str,
         role: CatalogRole,
     ) -> Result<()> {
+        let cell_type = self.validate_namespace(namespace, module, role)?;
+        // Namespace helpers derive four-byte shard targets internally. Accepting
+        // an entity declaration here would bypass the application's topology.
+        if cell_type.partition_version != 1 {
+            return Err(Error::Identity(
+                "namespace capability requires fixed shards",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_namespace(
+        &self,
+        namespace: NamespaceId,
+        module: &'static str,
+        role: CatalogRole,
+    ) -> Result<&CellType> {
         let Some(cell_type) = self
             .compiled
             .cell_types
@@ -556,7 +711,7 @@ impl<A> ApplicationHandle<A> {
         if contract.role != role {
             return Err(Error::Registry("namespace module differs from capability"));
         }
-        Ok(())
+        Ok(cell_type)
     }
 }
 
@@ -621,321 +776,12 @@ fn role_code(role: CatalogRole) -> u8 {
     }
 }
 
+mod client_macro;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use cellule_runtime::{CellModule, Digest, ModuleDescriptor, NamespaceDescriptor};
+mod tests;
 
-    struct SqlModule;
-
-    impl CellModule for SqlModule {
-        const NAME: &'static str = "app-sql";
-
-        fn descriptor(&self) -> &'static ModuleDescriptor {
-            static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
-                name: "app-sql",
-                source_digest: Digest::from_bytes([1; 32]),
-                retained_codes: &[],
-                schema_min: 1,
-                schema_max: 1,
-                migrations: &[cellule_runtime::MigrationDescriptor {
-                    version: 1,
-                    sql: "-- app-sql migration v1",
-                    digest: Digest::from_bytes([
-                        0x43, 0x1d, 0x99, 0x74, 0x5c, 0x8f, 0x39, 0x00, 0x9d, 0x2e, 0xe2, 0x00,
-                        0x7c, 0x75, 0x42, 0xe3, 0xa5, 0xf0, 0x0c, 0x92, 0x21, 0x8b, 0xf7, 0x3b,
-                        0x8f, 0x6f, 0x6b, 0xc3, 0x38, 0xe4, 0xf5, 0xca,
-                    ]),
-                }],
-                commands: &[],
-                queries: &[],
-                workflow_definitions: &[],
-                activity_types: &[],
-                namespaces: &[
-                    NamespaceDescriptor {
-                        id: NamespaceId::from_bytes([2; 16]),
-                        name: "app-sql",
-                        role: CatalogRole::Sql,
-                        shards: 1,
-                        effect_targets: &[],
-                        dead_letter: None,
-                    },
-                    NamespaceDescriptor {
-                        id: NamespaceId::from_bytes([3; 16]),
-                        name: "app-sql-2",
-                        role: CatalogRole::Sql,
-                        shards: 1,
-                        effect_targets: &[],
-                        dead_letter: None,
-                    },
-                ],
-            };
-            &DESCRIPTOR
-        }
-
-        fn register(self, _registry: &mut RegistryBuilder) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn build(reverse: bool) -> CompiledApplication {
-        let mut builder = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        builder.register(SqlModule).unwrap();
-        let first = CellType::new(
-            "app-sql",
-            "orders",
-            NamespaceId::from_bytes([2; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        let second = CellType::new(
-            "app-sql",
-            "inventory",
-            NamespaceId::from_bytes([3; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        if reverse {
-            builder.cell_type(second).unwrap();
-            builder.cell_type(first).unwrap();
-        } else {
-            builder.cell_type(first).unwrap();
-            builder.cell_type(second).unwrap();
-        }
-        builder.finish().unwrap()
-    }
-
-    #[test]
-    fn descriptor_is_stable_and_scope_is_checked() {
-        let first = build(false);
-        let second = build(true);
-        assert_eq!(first.descriptor_bytes(), second.descriptor_bytes());
-        assert_eq!(first.descriptor_digest(), second.descriptor_digest());
-        assert_eq!(
-            first.registry().release_digest(),
-            first.registry().release_digest()
-        );
-    }
-
-    #[test]
-    fn compiled_application_rejects_cross_module_invocation_targets() {
-        let application = build(false);
-        let sql_namespace = NamespaceId::from_bytes([2; 16]);
-
-        assert!(
-            application
-                .validate_module(sql_namespace, "app-sql")
-                .is_ok()
-        );
-        assert!(
-            application
-                .validate_module(sql_namespace, "unrelated-module")
-                .is_err()
-        );
-        assert!(
-            application
-                .validate_module(NamespaceId::from_bytes([99; 16]), "app-sql")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn duplicate_cell_namespace_and_mismatched_module_fail_closed() {
-        let mut builder = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        let cell_type = CellType::new(
-            "app-sql",
-            "orders",
-            NamespaceId::from_bytes([2; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        builder.cell_type(cell_type).unwrap();
-        assert!(builder.cell_type(cell_type).is_err());
-        builder.register(SqlModule).unwrap();
-        let mut wrong = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        wrong
-            .cell_type(
-                CellType::new(
-                    "other",
-                    "orders",
-                    NamespaceId::from_bytes([2; 16]),
-                    CatalogRole::Sql,
-                    1,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        wrong.register(SqlModule).unwrap();
-        assert!(wrong.finish().is_err());
-    }
-
-    #[test]
-    fn every_registered_namespace_requires_a_cell_type() {
-        let mut builder = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        builder.register(SqlModule).unwrap();
-        builder
-            .cell_type(
-                CellType::new(
-                    "app-sql",
-                    "orders",
-                    NamespaceId::from_bytes([2; 16]),
-                    CatalogRole::Sql,
-                    1,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-
-        assert!(builder.finish().is_err());
-    }
-
-    #[test]
-    fn cell_type_schema_range_must_match_compiled_module() {
-        let mut builder = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        builder.register(SqlModule).unwrap();
-        builder
-            .cell_type(
-                CellType::new(
-                    "app-sql",
-                    "orders",
-                    NamespaceId::from_bytes([2; 16]),
-                    CatalogRole::Sql,
-                    1,
-                )
-                .unwrap()
-                .with_schema_range(1, 2)
-                .unwrap(),
-            )
-            .unwrap();
-
-        assert!(builder.finish().is_err());
-    }
-
-    #[test]
-    fn duplicate_cell_type_name_fails_closed() {
-        let mut builder = ApplicationBuilder::new(
-            "app",
-            BuildDescriptor {
-                source_revision: "source".into(),
-                cargo_lock_digest: Digest::from_bytes([9; 32]),
-            },
-        )
-        .unwrap();
-        let first = CellType::new(
-            "app-sql",
-            "orders",
-            NamespaceId::from_bytes([2; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        let second = CellType::new(
-            "app-sql",
-            "orders",
-            NamespaceId::from_bytes([3; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        builder.cell_type(first).unwrap();
-        assert!(builder.cell_type(second).is_err());
-    }
-
-    #[test]
-    fn cell_type_limits_and_partition_bounds_fail_closed() {
-        for shards in [0, 3, 8_192] {
-            assert!(
-                CellType::new(
-                    "app-sql",
-                    "orders",
-                    NamespaceId::from_bytes([2; 16]),
-                    CatalogRole::Sql,
-                    shards,
-                )
-                .is_err()
-            );
-        }
-        assert!(
-            CellType::new(
-                "app-sql",
-                "orders",
-                NamespaceId::from_bytes([0; 16]),
-                CatalogRole::Sql,
-                1,
-            )
-            .is_err()
-        );
-
-        let cell_type = CellType::new(
-            "app-sql",
-            "orders",
-            NamespaceId::from_bytes([2; 16]),
-            CatalogRole::Sql,
-            1,
-        )
-        .unwrap();
-        assert!(cell_type.with_limits(0, 1).is_err());
-        assert!(cell_type.with_limits(1, 0).is_err());
-        assert!(cell_type.with_schema_range(0, 1).is_err());
-        assert!(cell_type.with_schema_range(2, 1).is_err());
-    }
-
-    #[test]
-    fn uuid_entity_partition_has_its_own_descriptor_and_validation() {
-        let namespace = NamespaceId::from_bytes([2; 16]);
-        let fixed = CellType::new("app-sql", "orders", namespace, CatalogRole::Sql, 1).unwrap();
-        let entity = CellType::entity_uuid("app-sql", "orders", namespace).unwrap();
-        assert_eq!(fixed.partition_version, 1);
-        assert_eq!(entity.partition_version, UUID_PARTITION_VERSION);
-        assert!(entity.shard_for_scope(b"one").is_err());
-
-        let mut uuid = [0; 16];
-        uuid[6] = 0x70;
-        uuid[8] = 0x80;
-        assert!(canonical_uuid_partition(&uuid));
-        assert!(!canonical_uuid_partition(&uuid[..15]));
-        uuid[6] = 0;
-        assert!(!canonical_uuid_partition(&uuid));
-        uuid[6] = 0x70;
-        uuid[8] = 0;
-        assert!(!canonical_uuid_partition(&uuid));
-    }
-}
+// Compile the packaged guide without adding a public runtime surface.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod guide {}

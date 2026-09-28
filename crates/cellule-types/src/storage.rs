@@ -72,7 +72,7 @@ impl BucketIdentity {
     }
 }
 
-/// Scoped object-store prefixes issued by an embedding service for
+/// Scoped object-store prefixes issued by an application for
 /// path-limited views.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

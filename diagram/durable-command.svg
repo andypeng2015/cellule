@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 620" role="img" aria-labelledby="title desc">
+  <title id="title">One durable Cell command</title>
+  <desc id="desc">The application sends a command with a stable request identity to the fenced owner. The owner commits state and outcome in SQLite, prepares a verified immutable LTX root, pins it through authority compare and swap, and only then returns a result and receipt.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#25334b" stroke-width=".6"/></pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#b9c7d8"/></marker>
+    <style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.title{font-size:19px;font-weight:700;fill:#f8fafc}.sub{font-size:11px;fill:#a8b8cc}.actor{font-size:12px;font-weight:700;fill:#f8fafc}.msg{font-size:11px;fill:#e2e8f0}.ret{font-size:11px;fill:#a8b8cc}.line{fill:none;stroke:#b9c7d8;stroke-width:1.6;marker-end:url(#arrow)}.return{fill:none;stroke:#879bb3;stroke-width:1.5;stroke-dasharray:6 4;marker-end:url(#arrow)}.life{stroke:#52647c;stroke-width:1.3;stroke-dasharray:5 6}</style>
+  </defs>
+  <rect width="1060" height="620" rx="18" fill="#0f172a"/><rect width="1060" height="620" rx="18" fill="url(#grid)"/>
+  <text x="28" y="39" class="title">One durable command</text>
+  <text x="28" y="60" class="sub">Object-store publication path · time flows downward</text>
+  <rect x="35" y="79" width="150" height="44" rx="7" fill="#102a38" stroke="#22d3ee" stroke-width="1.5"/>
+  <rect x="235" y="79" width="150" height="44" rx="7" fill="#123b36" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="435" y="79" width="150" height="44" rx="7" fill="#382e50" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="635" y="79" width="150" height="44" rx="7" fill="#382e50" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="835" y="79" width="150" height="44" rx="7" fill="#4a351e" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="110" y="106" class="actor" text-anchor="middle">Application</text>
+  <text x="310" y="106" class="actor" text-anchor="middle">Cell owner</text>
+  <text x="510" y="106" class="actor" text-anchor="middle">SQLite</text>
+  <text x="710" y="106" class="actor" text-anchor="middle">LTX + store</text>
+  <text x="910" y="106" class="actor" text-anchor="middle">Authority</text>
+  <path class="life" d="M110 123V546M310 123V546M510 123V546M710 123V546M910 123V546"/>
+  <rect x="292" y="140" width="36" height="384" rx="4" fill="#13433b" stroke="#34d399" stroke-width="1"/>
+  <path class="line" d="M110 152H300"/><text x="205" y="143" class="msg" text-anchor="middle">command + request ID</text>
+  <path class="line" d="M320 203H500"/><text x="410" y="194" class="msg" text-anchor="middle">state + outcome</text>
+  <path class="return" d="M500 254H320"/><text x="410" y="245" class="ret" text-anchor="middle">WAL cut</text>
+  <path class="line" d="M320 305H700"/><text x="510" y="296" class="msg" text-anchor="middle">verified immutable root</text>
+  <path class="return" d="M700 356H320"/><text x="510" y="347" class="ret" text-anchor="middle">proposed root</text>
+  <path class="line" d="M320 407H900"/><text x="610" y="398" class="msg" text-anchor="middle">CAS: owner fence + exact root</text>
+  <path class="return" d="M900 458H320"/><text x="610" y="449" class="ret" text-anchor="middle">pinned-root proof</text>
+  <path class="return" d="M300 509H110"/><text x="205" y="500" class="ret" text-anchor="middle">result + receipt</text>
+  <text x="28" y="579" class="sub">With follower-log durability, a recoverable follower proof gates the reply; object publication follows.</text>
+</svg>

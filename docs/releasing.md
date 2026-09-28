@@ -1,17 +1,16 @@
 # Releasing Cellule
 
-The six workspace crates publish to crates.io as `cellule-types`,
+The seven workspace crates publish to crates.io as `cellule-types`,
 `cellule-store`, `cellule-ltx`, `cellule-runtime`, `cellule-app`, and
-`cellule-host`. They share one version: an embedding service depends on the
+`cellule-host`, and the optional `cellule-peer-http`. They share one version: an application depends on the
 set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
 
 ## Before the first release
 
-1. Confirm the crates.io names are still free (they were unclaimed when this
-   page was written):
+1. Check the registry for existing names and versions:
 
    ```sh
-   for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host; do
+   for crate in cellule-types cellule-store cellule-ltx cellule-runtime cellule-app cellule-host cellule-peer-http; do
      curl -s -A 'cellule-release-check' "https://crates.io/api/v1/crates/$crate" \
        | grep -q 'does not exist' && echo "$crate: free" || echo "$crate: TAKEN"
    done
@@ -22,11 +21,14 @@ set, and the intra-workspace requirements pin it exactly (`=0.1.0`).
    ```sh
    cargo fmt --all --check
    cargo check --workspace --all-targets --locked
-   cargo test --workspace --locked
+   cargo test --workspace --all-features --locked
    cargo test -p cellule-ltx --features replica --locked
    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
    python3 scripts/check-boundaries.py
+   python3 scripts/check-module-layout.py
+   python3 scripts/check-doc-rust-fences.py
+   python3 scripts/check-doc-links.py
    node crates/cellule-runtime/docs/validate.mjs
    ```
 
@@ -48,6 +50,7 @@ cargo publish -p cellule-ltx
 cargo publish -p cellule-runtime
 cargo publish -p cellule-app
 cargo publish -p cellule-host
+cargo publish -p cellule-peer-http
 ```
 
 Wait for each crate to appear in the registry index before publishing the next
@@ -58,9 +61,8 @@ token; nothing in this repository uploads on its own.
 ## After publishing
 
 - Tag the release and record the exact revisions in the release notes.
-- Switch Crab from its in-tree `crab-cell-*` crates to the published
-  `cellule-*` dependencies. From that point Cellule is the upstream, and
-  `docs/synthesis.md` is historical.
+- Applications can adopt the published `cellule-*` dependencies. Cellule
+  remains the source of truth for their contracts.
 - Keep the bundled attributions with the published crates: `cellule-ltx`
   ships `LICENSE` and `LICENSE.pierrec-lz4`, and its `UPSTREAM.md` must keep
   naming the Celld, rustyriver, Litestream, and LTX sources.

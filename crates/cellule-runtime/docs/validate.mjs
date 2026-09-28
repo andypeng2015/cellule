@@ -73,7 +73,7 @@ rejects(blob, upload + `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(
 rejects(blob, `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), 0, NULL);`, /FOREIGN KEY constraint/);
 rejects(cron, `INSERT INTO cron_schedules VALUES(zeroblob(16), 0, X'', X'', 999, 0, 0, 1, 1, 0);`, /CHECK constraint/);
 
-// Only message contracts are intended; product HTTP APIs belong to the embedding service.
+// Only message contracts are intended: product HTTP APIs remain in the application.
 const peer = readFileSync(path.join(contracts, 'peer.proto'), 'utf8');
 assert(!/^\s*service\s/m.test(peer), 'private contract must not generate a public service');
 assert(!/\b(?:WorkflowDecision|WorkflowAction)\b/.test(peer), 'native decisions do not cross peer RPC');
@@ -91,13 +91,14 @@ try {
   assertions++;
   const target = 'target { tenant_id: "tenant0000000001" application_id: "app0000000000001" namespace_id: "sql0000000000001" partition: "p" }';
   const identity = 'identity { request_id: "1234567890123456" incarnation: "abcdefghijklmnop" issued_at_ms: 1 expires_at_ms: 2 }';
+  const expected = 'expected { cell_id: "cccccccccccccccccccccccccccccccc" incarnation: "abcdefghijklmnop" code: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" schema: 1 }';
   // Serialization fixtures only; they do not prove authentication or signature validation.
   const fixtures = [
     {
       type: 'PeerRequest',
       input: 'version: 1 hop_count: 1 remaining_ms: 1000 authorization { origin_session: "session000000001" actions: "comment.write" } mutate {'
-        + target + identity + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
-      expected: /cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
+        + target + identity + expected + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
+      expected: /expected \{\s+cell_id: "cccccccccccccccccccccccccccccccc"\s+incarnation: "abcdefghijklmnop"\s+code: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\s+schema: 1\s+\}\s+cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
     },
     {
       type: 'MigrationRequest',
@@ -138,9 +139,11 @@ for (const name of readdirSync(root).filter(name => name.endsWith('.md'))) {
     const target = path.resolve(root, file || name);
     assert(existsSync(target), `${name}: missing ${match[1]}`);
     if (anchor && target.endsWith('.md')) {
-      const headings = [...readFileSync(target, 'utf8').matchAll(/^#+\s+(.+)$/gm)]
+      const targetText = readFileSync(target, 'utf8');
+      const headings = [...targetText.matchAll(/^#+\s+(.+)$/gm)]
         .map(m => m[1].toLowerCase().replace(/[^\p{L}\p{N}_\-\s]/gu, '').replace(/ /g, '-'));
-      assert(headings.includes(anchor), `${name}: missing anchor ${match[1]}`);
+      const explicitAnchors = [...targetText.matchAll(/<a id="([^"]+)"><\/a>/g)].map(m => m[1]);
+      assert(headings.includes(anchor) || explicitAnchors.includes(anchor), `${name}: missing anchor ${match[1]}`);
     }
     links++;
   }

@@ -1,5 +1,22 @@
 # cellule-types
 
-Stable, dependency-light storage identities shared by the Cellule layers. `StorageProviderKind` identifies the provider family; `BucketIdentity` identifies a physical storage destination without depending on `object_store` or a product server.
+Stable storage identities shared by Cellule crates. This crate does not construct
+providers, select Cell owners, or access object storage.
 
-Changes to identity equality or serialization affect cache and storage routing. See [the API](src/storage.rs), [architecture](../../docs/architecture.md), and `cargo test -p cellule-types --locked`.
+```mermaid
+flowchart LR
+    Input[Provider and bucket] --> Identity[BucketIdentity]
+    Identity --> Cache[Storage routing and cache identity]
+    Input --> Scope[StorageScope]
+    Scope --> Views[Scoped object views]
+```
+
+| Start here | Topic |
+| --- | --- |
+| [Identity contracts](docs/identity.md) | Provider kinds, normalization, and storage scope. |
+| [API](src/storage.rs) | Types and their tests. |
+| [Framework architecture](../../docs/architecture.md) | Where identities sit in the crate graph. |
+
+```sh
+cargo test -p cellule-types --locked
+```

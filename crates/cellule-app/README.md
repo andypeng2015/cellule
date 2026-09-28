@@ -1,39 +1,51 @@
 # cellule-app
 
-`cellule-app` compiles statically linked modules and Cell topology into a deterministic application descriptor. It gives application code typed handles after an embedding service has started and routed the Cells. The crate is not yet published to crates.io; use the public workspace checkout while release qualification is in progress.
+Declare a stable Cell topology, compile native Rust modules, and expose typed
+application handles. The host owns runtime lifecycle and network wiring.
 
-## Run the examples
-
-From the workspace root:
-
-```sh
-cargo run -p cellule-app --example orders --locked
-cargo run -p cellule-app --example carts --locked
-cargo run -p cellule-app --example notifications --locked
-cargo run -p cellule-app --example fulfillment --locked
-cargo run -p cellule-app --example invoices --locked
-cargo test -p cellule-app --test reference_application \
-  performance::reference_storefront_smoke --locked -- --exact --nocapture
+```mermaid
+flowchart LR
+    Modules[Native modules] --> Builder[ApplicationBuilder]
+    Topology[Cell types] --> Builder
+    Builder --> Descriptor[CompiledApplication]
+    Descriptor --> Host[CellNode]
+    Descriptor --> Handle[ApplicationHandle]
 ```
 
-The [orders executable](examples/orders.rs) creates one local SQL Cell, commits an order, and reads at the commit receipt. The [carts executable](examples/carts.rs) creates one KV Cell, conditionally saves a cart, and reads the published value. The [notifications executable](examples/notifications.rs) creates one Queue Cell, sends a notification, validates its claim, acknowledges it, and reads the acknowledged count. The [fulfillment executable](examples/fulfillment.rs) starts a Workflow, executes its native packing Activity, and reads the completed result. The [invoices executable](examples/invoices.rs) fires a Cron schedule, delivers the resulting effect to a SQL Cell, and reads the invoice row. The [storefront application](tests/reference_application.rs) registers seven Cells and verifies all six primitive lanes together. The [quickstart](../../docs/quickstart.md) maps each action to its call sequence. All six runs use temporary SQLite files and in-memory object storage.
+| Guide | Topic |
+| --- | --- |
+| [API guide](../../docs/api.md) | Compile an application, bind handles, invoke commands, and handle outcomes. |
+| [Topology](docs/topology.md) | Stable IDs, shards, entity partitions, and descriptors. |
+| [Invocations](docs/invocation.md) | Typed clients, read policy, and receipts. |
+| [Examples and tests](docs/examples.md) | Runnable paths and proof levels. |
 
-## Author an application
+This complete declaration is compiled as a crate doc test:
 
-1. Implement `CellModule` for each statically linked module. Its `ModuleDescriptor` declares the stable module name, namespace IDs and roles, schema range, migrations, and operation IDs. Bind each command and query in `register`; the registry checks that the bindings match the descriptor.
-2. Implement `CellApplication::register` to register those modules and add one `CellType` for every declared namespace. `ApplicationBuilder::finish` rejects missing, duplicate, or mismatched topology before the service opens readiness.
-   Use `CellType::entity_uuid` for a SQL namespace with one Cell per canonical UUID partition; ordinary `CellType::new` declarations retain fixed four-byte shard partitions. The partition version is persisted in the application descriptor.
-3. Compile with `CellApplication::compile(BuildDescriptor { source_revision, cargo_lock_digest })`. Use real build evidence for a persistent deployment; the standalone examples use fixed demo revisions because their stores are fresh on every run.
-4. Once the embedding service has a routed `CellClient`, construct `ApplicationHandle` with the compiled application, tenant ID, and application ID. Get `sql`, `kv`, `blob`, `queue`, `workflow`, `activities`, `cron`, or `effects` capabilities for the registered modules.
+```rust
+use cellule_app::CellType;
+use cellule_runtime::{CatalogRole, NamespaceId};
 
-Keep namespace IDs, operation IDs, and schema versions stable for persisted Cells. The registry requires a nonzero source digest and contiguous, digest-verified migrations covering the declared schema range. A descriptor change needs a migration or explicit compatibility proof; changing the build revision or lockfile digest also changes release identity. See the [application source](tests/reference_application.rs) for a multi-module declaration and the [architecture guide](../../docs/architecture.md) for the persistent boundary.
+fn orders_topology() -> cellule_runtime::Result<CellType> {
+    CellType::new(
+        "orders",
+        "orders",
+        NamespaceId::from_bytes([1; 16]),
+        CatalogRole::Sql,
+        1,
+    )?
+    .with_entity_partitions()
+}
 
-For built-in KV, Blob, Queue, Cron, and Workflow modules, use the exported version-one `*_SCHEMA_SQL` value in the module's `MigrationDescriptor`. The corresponding `install_*_schema` function installs those same bytes at bootstrap. Keep any application table migrations consistent with their bootstrap SQL.
+assert!(orders_topology().is_ok());
+```
 
-## Invoke and verify
+For SQL Cells addressed directly by canonical 16-byte UUIDs, use
+`CellType::entity_uuid`. It has a separate persisted partition version from
+the 33-byte hashed entity mode. See [Topology](docs/topology.md).
 
-Caller-issued mutations carry a `MutationIdentity` with one request ID and a bounded lifetime. Reuse that identity when retrying the same mutation. A successful typed command returns `Committed<T>` with a receipt after the runtime's durability boundary; pass that receipt to a query when the read must include the commit. A pending mutation can be resolved through `ApplicationHandle::resolve` after an ambiguous outcome.
-
-`ApplicationHandle` checks tenant, application, and module scope before dispatch; typed capability constructors also validate the registered namespace and role. Provider construction, network ingress, authentication, and node lifecycle belong to the embedding service or `cellule-host`; they are outside this crate.
-
-Run `cargo test -p cellule-app --locked` after changing registration or handles. The [performance guide](PERFORMANCE.md) describes the three-runtime and three-process workloads and their measurement limits.
+```sh
+cargo run -p cellule-app --example application_descriptor --locked
+cargo run -p cellule-app --example orders --locked
+cargo run -p cellule-app --example attachments --locked
+cargo test -p cellule-app --locked
+```

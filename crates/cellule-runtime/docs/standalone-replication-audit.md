@@ -1,5 +1,10 @@
 # Standalone replication compatibility audit
 
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+
 Status: **Decision recorded — HARD REMOVE executed by plan 017**. This record is
 the evidence boundary for the breaking cleanup; the canonical Cell path is the
 only shipped replication surface after this change.
@@ -62,7 +67,7 @@ breaking removal.
 | Paged frame hash/CRC and writable sparse VFS | `CellPagedDatabase`, `Db::hydrate_step`, shared VFS | Covered by Cell root sparse-read, coalescing, hydration, and checksum-failure tests |
 | Caller-driven level schedule | Cell scheduled compaction and actor hydration tick | Covered by Cell scheduled compaction and runtime owner scheduling |
 | Standalone source-loss/reopen tests | Cell source-loss takeover/publication tests | Covered by Cell root reopen, restore, and runtime failover suites |
-| Celld/rustyriver compatibility fixtures | Cellule CRB1/LTX exact-root tests | Missing external wire-compatibility qualification; not an authorization contract |
+| Celld/rustyriver compatibility fixtures | Crab CRB1/LTX exact-root tests | Missing external wire-compatibility qualification; not an authorization contract |
 
 The hard-removal implementation ports the unique safety ownership to the Cell
 tests before deleting the standalone test owners. It retains no runtime reader,
@@ -85,12 +90,12 @@ Cell-scoped root before upgrading; this change does not delete remote data.
 ## Evidence commands
 
 ```text
-rg -n "ReplicaHead|PagedDatabase|PagedConnection|CompactionSchedule|prune_published|open_paged" crates/cellule-ltx crates/cellule-runtime crates/the embedding service
+rg -n "ReplicaHead|PagedDatabase|PagedConnection|CompactionSchedule|prune_published|open_paged" crates/cellule-ltx crates/cellule-runtime crates/crab-http-server
 cargo metadata --format-version 1 --locked
 git tag --contains 4d097cce362048b843d557394827847e03102eab
 ```
 
 Related architecture records: [cellule-ltx README](../../cellule-ltx/README.md),
 [UPSTREAM.md](../../cellule-ltx/UPSTREAM.md),
-the [canonical LTX scaling design](canonical-ltx-scaling.md), and the
-standalone-replication decision record retained in the Crab repository.
+the [canonical LTX scaling design](canonical-ltx-scaling.md), and
+[execution plan 017](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/017-execute-standalone-replication-decision.md).

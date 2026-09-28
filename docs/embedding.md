@@ -1,93 +1,101 @@
 # Embed Cellule in a service
 
-Cellule is a Rust library, not a server. An embedding service supplies its own
-API, authentication, cloud credentials, private peer transport, node directory,
-and deployment policy. Start with the [local SQL, KV, Queue, Workflow, and Cron examples](quickstart.md),
-which commit and read real Cells without those adapters. This guide
-covers the additional ownership needed before a service can accept traffic.
+Cellule supplies reusable state and lifecycle mechanics. An application
+owns ingress, authorization, cloud credentials, deployment configuration, and
+fleet policy. Start with the [orders example and application integration suite](quickstart.md).
 
 ## Assemble one node
 
-1. Compile a [`CellApplication`](../crates/cellule-app/src/lib.rs) with stable
-   namespace, operation, and schema IDs. Supply the deployed source revision
-   and lockfile digest in `BuildDescriptor`; the examples' fixed revisions are
-   only for fresh, disposable stores.
-2. Construct an object-store provider and a [`Store`](../crates/cellule-store/src/lib.rs).
-   Give each application an explicit storage prefix through
-   [`CellStorageLayout`](../crates/cellule-ltx/src/cell_layout.rs).
-   Keep credentials in the service. Provision or load the Cell catalog and
-   authority before acquiring a Cell; recovery must follow the authority-pinned
-   root, not a bucket listing.
-3. Build one [`CellNode`](../crates/cellule-host/src/lib.rs) with
-   `CellNodeBuilder::new(compiled)`, `with_runtime`, `with_replica_host`, and
-   `with_session`. Set resource limits from the node's actual CPU, memory, and
-   local disk capacity. Install its task group before the node lease. Register
-   provider adapters as owned components or facilities so shutdown retains
-   their drain callbacks.
-4. Build the service's authenticated ingress and private peer transport. A
-   single-process service can route known local handles with
-   `CellClient::local_many`; a fleet supplies `PeerRoundTrip`, a signed
-   `CellClient::peer`, and an inbound verifier. Bind a typed
-   `ApplicationHandle` through the node after routing is ready. Do not expose
-   a peer endpoint merely because a socket has bound: serving also requires
-   the expected application release and a live owner session. The transport
-   adapter must classify a lost reply or post-dispatch failure as
-   `PeerTransportUnknown`; an HTTP status such as 503 cannot prove non-delivery.
-   A received response permits a safe retry only when its valid peer reply
-   explicitly says `NotStarted`.
-5. Probe the provider operations the deployment uses, publish the node session
-   through the service's authoritative directory, and install the resulting
-   [`NodeLeaseGuard`](../crates/cellule-runtime/src/node_lease.rs) with
-   `install_node_lease_for_startup`. The guard must come from a successful
-   authoritative publish or refresh. Run lease renewal and a self-fencing
-   watcher in the node task group. Call `start()` after required components,
-   listeners, and supervisors are ready; then expose service readiness only
-   while both `CellNode::is_ready()` and the service's lease and release checks
-   hold.
+| Step | Action | Boundary |
+| --- | --- | --- |
+| Compile | Register modules, schemas, and stable IDs in `CellApplication`. | `BuildDescriptor` pins source and lockfile digests. |
+| Store | Construct `Store` and `CellStorageLayout`; provision the tenant catalog. | Credentials remain in the service. |
+| Build | Configure one `CellNodeBuilder` with runtime, replica host, and session. | Memory, disk, and jobs have explicit limits. |
+| Enroll | Publish the signed node session; install its lease and renewal task. | Use `spawn_lease_maintenance` for renewal. |
+| Serve | Install routing and owned facilities; call `start()`. | External readiness also checks provider, release, and listener state. |
 
-The [Crab server integration](https://github.com/crabbuild/crab/pull/277) is a
-concrete embedding example: it builds one node, installs the task group and
-owned adapters, publishes a session, installs its lease, starts supervisors,
-and opens readiness last. Its HTTP, Git, identity, and deployment choices
-belong to Crab rather than to Cellule.
+```mermaid
+flowchart LR
+    Compile --> Store --> Build --> Enroll --> Ready[Ready to serve]
+    Ready --> Stop[Stop admission]
+    Stop --> Drain[Drain accepted work]
+    Drain --> Close[Close covered node log]
+    Close --> Withdraw[Stop renewal and withdraw session]
+```
 
-Release migration is also a peer operation. `MigrationPeerClient::migrate`
-re-describes the Cell when the migration reply is lost, malformed, or cannot
-confirm the requested successor. If it still cannot confirm the successor, it
-returns `PeerTransportUnknown`; inspect the current Cell description before
-deciding whether to retry the same migration plan.
+Before admitting traffic, run `cellule_store::probe_storage` on a fresh private
+prefix in the configured store. Inspect `StorageProbeReport::passed` and
+`failed_checks` to reject providers that cannot honor conditional create,
+ETag update, stale-ETag rejection, and exact ranged reads. Readiness policy stays
+in the application; the host does not implicitly run a credentialed probe.
 
-`build_unleased_for_maintenance()` is for private, bounded offline work. It
-uses object-only admission and cannot be advertised as a serving node.
+`build_unleased_for_maintenance()` is for bounded offline work. It is not a
+serving-node initialization path.
 
-## Serve and stop
+## Peer transport
 
-For a request, authenticate at the service boundary, select the exact tenant,
-application, namespace, and partition, then use a typed capability from
-`ApplicationHandle`. Reuse the same `MutationIdentity` when retrying an
-ambiguous command; resolve a pending mutation instead of inventing a second
-identity. Cellule treats a timed-out round trip or an unusable mutation reply
-as an unknown outcome; the mutation may still have reached its owner. Use a
-commit receipt as a query minimum when the caller needs to observe its write. The
-[reference application](quickstart.md#run-the-reference-application)
-exercises these calls for SQL, KV, Blob, Queue, Workflow/Activity, and
-Cron/Effect.
+`cellule-peer-http` is an optional adapter above the runtime. It supplies
+`PeerHttpRoundTrip`, pinned mTLS clients, and an mTLS listener; it does not
+install a public route or authorize application users.
 
-On shutdown, stop new ingress, cancel the service's supervisors, and call
-`CellNode::shutdown_until(deadline)`. A deadline error is not a clean stop. A
-runtime drain already started continues, and a later call can wait for its result.
-Only report a clean stop after shutdown succeeds. The host releases accepted
-work and its registered facilities; the service still owns listener shutdown,
-directory withdrawal, credentials, and any external effect destination.
+The service supplies a `PeerTargetScope`, loads the local identity with
+`LoadedPeerTls::load`, and wires `PeerHttpRoundTrip` into a signed `CellClient`.
+The incoming route must authenticate the enrolled peer, verify the signed
+request, enforce application authorization, and dispatch with `PeerDispatcher`.
+Read the [transport contract](../crates/cellule-peer-http/README.md) before
+implementing that receiver, especially its 429/503 admission semantics.
 
-## Qualify the deployment
+Both owner-routed and direct-node requests reject an oversized body or exhausted
+deadline before dispatch. A lost or invalid response remains an unknown outcome.
+The receiver and caller must not infer that a mutation failed merely because its
+HTTP response was lost.
 
-The in-memory examples and local three-process storefront smoke prove
-application wiring, not cloud-provider or deployment behavior. Before a
-production rollout, run the [qualification profiles](../crates/cellule-runtime/qualification/README.md)
-against each selected provider and the intended node topology. Capture real
-conditional-write, range-read, multipart, owner-loss, recovery, resource, and
-fault observations. Bind protected receipts to the exact source revision,
-image, profile, and measured artifacts; verify them with the pinned attestation
-key. The embedding service owns the harness, credentials, deployment, and
-release gate.
+```mermaid
+sequenceDiagram
+    participant Client as Application client
+    participant Gateway as Ingress node
+    participant Owner as Fenced Cell owner
+    participant Store as Durable outcome ledger
+    Client->>Gateway: Command with stable request ID
+    Gateway->>Owner: Signed owner-routed request
+    Owner->>Store: Commit and publish outcome
+    Store-->>Owner: Durable proof
+    alt Response arrives
+        Owner-->>Gateway: Result and receipt
+        Gateway-->>Client: Result and receipt
+    else Response is lost
+        Gateway-->>Client: Outcome unknown
+        Client->>Gateway: Resolve the same request ID
+        Gateway->>Owner: Look up durable outcome
+        Owner-->>Gateway: Recorded result and receipt
+        Gateway-->>Client: Recorded result and receipt
+    end
+```
+
+Resolve an ambiguous response using the original request ID. Creating a new ID
+would ask the owner to execute a second command.
+
+## Read replicas and delivery
+
+Use the [host's read-replica manager and recruitment API](../crates/cellule-host/README.md)
+for selected immutable snapshots, refresh, eviction, and fenced warm promotion.
+Native-memory reservations for snapshots are separate from writer capacity;
+configure `SqlWorkerPool::with_native_memory_limit` explicitly. Queries do not
+activate missing readers or bypass their admission policy.
+
+Activities and Effects retain their runtime supervisors. The application
+owns which supervisors to start, their schedules, and their cancellation through
+the node task group. The old framework-wide automatic delivery loop is superseded
+by the current host lifecycle.
+
+## Drain and shutdown
+
+`CellNode` owns exactly one runtime. Shutdown first stops admission and joins
+work producers while lease maintenance remains live. It drains accepted work
+and the covered node log, then cancels node shutdown and joins lease maintenance
+before releasing the session. All phases share the shutdown deadline.
+
+Scale-down and shutdown serialize through one drain lane. A caller's deadline
+bounds the releases it starts; it does not bound waiting for that lane. Fleet
+movement budgets belong to the planner. Keep service readiness and session
+withdrawal in the same lifecycle as the host.

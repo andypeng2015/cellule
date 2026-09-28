@@ -1,11 +1,14 @@
 [package]
 name = "cellule-app"
+autoexamples = false
+# Integration modules live directly in tests/; only these two files are targets.
+autotests = false
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Typed application composition for Cellule"
+description = "Dependency-light author API for Cellule applications"
 
 [dependencies]
 blake3.workspace = true
@@ -13,11 +16,34 @@ cellule-runtime.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+cellule-host.workspace = true
+cellule-runtime = { workspace = true, features = ["test-support"] }
 cellule-ltx = { workspace = true, features = ["replica"] }
-cellule-store = { workspace = true, features = ["test-support"] }
+cellule-store.workspace = true
 ed25519-dalek.workspace = true
-fs4 = "0.13"
 futures-util.workspace = true
 object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio-util.workspace = true
+tracing-subscriber = "0.3"
+
+[[test]]
+name = "contracts"
+path = "tests/contracts.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[example]]
+name = "application_descriptor"
+path = "examples/application_descriptor.rs"
+
+[[example]]
+name = "orders"
+path = "examples/orders.rs"
+
+[[example]]
+name = "attachments"
+path = "examples/attachments.rs"

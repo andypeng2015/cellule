@@ -1,7 +1,23 @@
 # cellule-host
 
-`CellNodeBuilder` binds a compiled application, one runtime, a replica host, and a node session. `CellNode` owns admission, registered facilities, task groups, drain, and shutdown. A server attaches its provider and peer adapters; the host keeps accepted work and resource release under one lifecycle.
+`CellNode` owns one runtime, its admission ledger, facilities, and task group.
+An application supplies identity, provider, ingress, and authorization.
 
-Create the node with `CellNodeBuilder::new`, install task and lease ownership before serving, obtain a typed application handle, then call `shutdown` after ingress has stopped. The [host API](src/lib.rs) validates required setup and rejects duplicate or late lifecycle installation. A failed facility drain leaves the node in `Draining`; after fixing the facility, call `shutdown` again. A `shutdown_until` deadline bounds the wait, while the runtime drain continues for a later call to join. Follow the [embedding guide](../../docs/embedding.md) for the service startup order, the [reference application](../../docs/quickstart.md) for typed actions, and `cargo test -p cellule-host --locked` for lifecycle behavior.
+```mermaid
+stateDiagram-v2
+    [*] --> Starting
+    Starting --> Ready: lease and required components installed
+    Ready --> Draining: stop admission and producers
+    Draining --> Closing: accepted work drained
+    Closing --> Stopped: close log and withdraw session
+```
 
-`drain_for_scale_down` stops new acquisition, paces exact actor releases of idle Cells until its deadline, and reports released, blocked, and remaining Cell counts. An incomplete drain keeps the node lease and its facilities for a later retry; reaching zero ownership runs the terminal shutdown.
+| Guide | Topic |
+| --- | --- |
+| [Lifecycle](docs/lifecycle.md) | Builder, readiness, drain, and shutdown. |
+| [Read replicas](docs/read-replicas.md) | Admission, recruitment, refresh, and eviction. |
+| [Crate API](src/lib.rs) | Exported node and facility types. |
+
+```sh
+cargo test -p cellule-host --locked
+```

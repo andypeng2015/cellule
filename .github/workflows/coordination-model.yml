@@ -4,8 +4,8 @@ on:
   pull_request:
     paths:
       - "crates/cellule-runtime/model/**"
-      - "crates/cellule-runtime/src/coordination.rs"
-      - "crates/cellule-runtime/src/coordination_sim.rs"
+      - "crates/cellule-runtime/src/coordination/mod.rs"
+      - "crates/cellule-runtime/src/coordination/**"
       - ".github/workflows/coordination-model.yml"
   schedule:
     - cron: "17 3 * * 1"
@@ -84,7 +84,7 @@ jobs:
           {
             printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
             printf 'seed_range=0..511\nsteps_per_seed=256\n'
-            cargo test -p cellule-runtime coordination_sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture
+            cargo test -p cellule-runtime coordination::sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture
           } 2>&1 | tee "$RUNNER_TEMP/cell-coordination-simulation/simulator.log"
       - name: Upload simulator evidence
         if: ${{ always() }}

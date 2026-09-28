@@ -34,7 +34,7 @@ Run from the repository root with a target directory unique to this checkout:
 
 ```bash
 CELLULE_PERF_ITERATIONS=100 \
-CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/cellule-my-worktree \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-89be5c6d \
   cargo test -p cellule-app --test reference_application \
   process_performance::reference_three_process_fleet_end_to_end_performance \
   --release --locked -- --ignored --nocapture

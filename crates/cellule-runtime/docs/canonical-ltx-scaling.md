@@ -1,8 +1,46 @@
 # Complete and qualify canonical Cell LTX scaling
 
-Cellule will finish production scaling on one canonical persistence path:
+> Historical design and audit record from the original Cellule synthesis.
+> Keep this detail for provenance; use [the current runtime guide](README.md)
+> for present framework boundaries.
+
+```mermaid
+flowchart LR
+    WAL[Committed SQLite WAL] --> Capture[Managed LTX capture]
+    Capture --> Root[Verified immutable root]
+    Root --> CAS[Owner-fenced authority CAS]
+    CAS --> Receipt[Durable receipt]
+    Root --> Recovery[Exact or sparse recovery]
+    Capacity[Resource envelope and placement] --> Capture
+    Capacity --> Recovery
+```
+
+## Navigate this reference
+
+- [Make one path canonical](#detail-01)
+- [Preserve intentional redundancy](#detail-02)
+- [Meet these design goals](#detail-03)
+- [Close the three major architecture gaps](#detail-04)
+- [Deepen existing modules instead of multiplying surfaces](#detail-05)
+- [Make coordination deterministic](#detail-06)
+- [Make warm resident reads local](#detail-07)
+- [Balance ownership under live pressure](#detail-08)
+- [Apply the architecture uniformly to native primitives](#detail-09)
+- [Stream canonical Cell publication](#detail-10)
+- [Persist only verified directory acceleration](#detail-11)
+- [Make resident lifecycle explicit](#detail-12)
+- [Use one resource envelope](#detail-13)
+- [Qualify production behavior](#detail-14)
+- [Standalone replication contract: hard removal recorded and executed](#detail-15)
+- [Deliver in dependency order](#detail-16)
+- [Verify every slice](#detail-17)
+- [Reject these shortcuts](#detail-18)
+- [Declare completion precisely](#detail-19)
+
+
+Crab will finish production scaling on one canonical persistence path:
 `Db` captures SQLite, `CellReplica` prepares immutable roots,
-`CellRuntime` owns execution and durability, and the embedding service composes the
+`CellRuntime` owns execution and durability, and `crab-http-server` composes the
 product. The older standalone epoch-head, paged, and scheduler surfaces were
 present in release tag `v1.2.4` but are now hard-removed under the recorded
 compatibility decision; their stored prefixes are never interpreted as Cell
@@ -11,19 +49,20 @@ roots.
 | Document intent | Value |
 | --- | --- |
 | Content type | Target design and delivery contract |
-| Audience | `cellule-ltx`, `cellule-runtime`, and the embedding service contributors |
+| Audience | `cellule-ltx`, `cellule-runtime`, and `crab-http-server` contributors |
 | Goal | Bound canonical Cell resources and qualify production scale/failover on one native Rust path |
-| Status | Reference design; the reusable mechanics live in `cellule-runtime` and `cellule-ltx`, and standalone replication is hard removed. Product provider, Kubernetes, and multi-GiB qualification stays with the embedding service |
+| Status | In progress; implementation slices are tracked in `advisor-plans/004`–`017`; standalone hard removal is executed |
 | Scope | LTX preparation, authenticated metadata, resident lifecycle, resource accounting, qualification, and standalone-contract consolidation |
 
 [Back to the Cell runtime index](README.md)
 
+<a id="detail-01"></a>
 ## Make one path canonical
 
 The production dependency and authority path is:
 
 ```text
-the embedding service RepositoryCellRouter
+crab-http-server RepositoryCellRouter
   -> cellule-runtime CellRuntime
     -> CellExecutor + CellPublisher + CellAuthority
       -> cellule-ltx Db + CellReplica
@@ -40,7 +79,7 @@ Each module has one responsibility:
 | `CellPublisher` | Immutable preparation, ordered publication, ambiguous-result reconciliation | Owner selection |
 | `CellAuthority` | Sole mutable owner, epoch, recovery overlay, and root CAS | SQLite or LTX parsing |
 | `CellRuntime` | Activation, admission, durability gate, recovery, drain, and local lifecycle | HTTP authentication or provider construction |
-| the embedding service | Product routing, authorization, peer transport, deployment, and composition | LTX parsing or alternate publication |
+| `crab-http-server` | Product routing, authorization, peer transport, deployment, and composition | LTX parsing or alternate publication |
 
 `CellReplica` writes immutable objects and never changes mutable authority.
 `CellAuthority` remains the only module allowed to publish a prepared root into
@@ -56,6 +95,7 @@ Production server code must not call `cellule-ltx` directly. Test fixtures may u
 the server's `cellule-ltx` development dependency to construct exact inputs, but
 product behavior crosses the `cellule-runtime` interface.
 
+<a id="detail-02"></a>
 ## Preserve intentional redundancy
 
 This design removes duplicate ownership, not useful independent mechanisms.
@@ -84,6 +124,7 @@ cell.serving => control names this owner and exact root
              AND every attached recovery overlay was consumed
 ```
 
+<a id="detail-03"></a>
 ## Meet these design goals
 
 1. Bound publication memory by configured buffers, not database or capture size.
@@ -110,7 +151,12 @@ cell.serving => control names this owner and exact root
 The following are not goals:
 
 - A V8, JavaScript, WebAssembly, dynamic-library, or public primitive host.
-- A second mutable SQLite owner, read replica, or hot SQL standby.
+- A second mutable SQLite owner or hot SQL standby. In object durability mode,
+  an explicit desired-reader policy can activate admitted read-only exact-root
+  views through private peers. Repository issue-detail reads can explicitly
+  select a replica and return its observed receipt; other product reads still
+  use the owner while [Plan 036](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+  completes routing and qualification.
 - A fallback from Cell roots to standalone epoch heads.
 - Listing local files or object prefixes to infer the latest state.
 - Reusing an old mutable SQLite file merely because it exists locally.
@@ -121,27 +167,35 @@ The following are not goals:
 - Hot migration of a writable SQLite process or direct owner-to-owner transfer.
 - A central mutable scheduler whose loss can stop safe request routing.
 
+<a id="detail-04"></a>
 ## Close the three major architecture gaps
 
 This plan adds three first-class workstreams beyond LTX allocation and local
-lifecycle. They are gaps in the current canonical Cellule path, not evidence that
+lifecycle. They are gaps in the current canonical Crab path, not evidence that
 the path should be replaced.
 
-| Gap | Current Cellule evidence | Target architecture | Required proof |
+| Gap | Current Crab evidence | Target architecture | Required proof |
 | --- | --- | --- | --- |
 | Protocol assurance | `Control` retains pure persistent transitions. The runtime now has a private coordination state machine, deterministic simulator, and pinned TLA+ model; async adapters carry activation generations and typed per-effect intents/IDs while parity coverage is still expanding. | One private sans-I/O coordination kernel used by production and simulation, a replayable adversarial scheduler, and a TLA+ model of the same durable state machine. | Pinned seeds find deliberately broken variants; model configurations check single-writer and acknowledged-durability invariants; remaining work is full decision extraction/parity, not a second policy path. |
-| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `Db::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
+| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation selects and installs bounded background page batches on the SQL worker while fetching asynchronously outside it. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
 | Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Ownership counts now balance by weighted share beside the material headroom-gain path: one elected donor per complete snapshot, a two-percent receiver deadband, and batch, surplus, and room bounds. Cold activation also sends one authenticated hint to a preferred live node. Local, planner, and process race tests cover exact-root preservation, stale-owner fencing/recovery, donation without headroom gain, refusal to mix pre-batch counts, convergence at target, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
+
+The ownership margin reserves only whole Cells: `floor(target * 2 / 100)`.
+Rounding it up makes an empty receiver ineligible at a one-Cell target.
+Each donation also consumes the receiver's projected room within its batch;
+fleet-wide room alone cannot prevent a preferred receiver from overshooting.
+The 3/5/10/20-node convergence regression covers these small targets, while
+the existing stale-view, settlement and resource gates remain in force.
 
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Its documentation reports about 1.1 ms p50 and 7 ms p99 for one fixed-host
-warm resident request. Those numbers are a comparison baseline, not a Cellule
+warm resident request. Those numbers are a comparison baseline, not a Crab
 measurement or an unconditional acceptance threshold. Celld also documents a
 pure decision core, seeded simulation, small-state specification, weighted
 ownership balancing, idle eviction, pressure shedding, and paced drains. Its
 current balancing limitation is equally relevant: Cells are weighted by node
 capacity but counted uniformly rather than by measured per-Cell CPU or memory.
-Cellule should close the assurance and routing gaps, then exceed that placement
+Crab should close the assurance and routing gaps, then exceed that placement
 model without weakening its exact-root and dual durability proofs.
 
 The current-code evidence map is:
@@ -153,13 +207,13 @@ shared authenticated mechanics remain private to Cell roots.
 
 | Surface | Current owner and behavior |
 | --- | --- |
-| Request entry | The embedding service's `RepositoryCellRouter::route_target` calls `route_existing` twice around an activation lock, then repeats catalog and control loads for activation. |
-| Metadata lookup | [`CellCatalog::lookup`](../src/catalog.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/authority.rs) separately reads exact control. |
-| Local residency | [`CellRuntime::resident_handle`](../src/actor.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/actor.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
-| Sparse hydration | [`Db::hydration` and `hydrate_step`](../../cellule-ltx/src/db.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
-| Fleet observation | The embedding service's `NodePublisher` signs short-lived measured capacity and backlog observations; `NodeAdvertisement` carries a versioned placement signature. Its `RepositoryCellRouter` plans movement from live signed samples and actor-settled candidates, then records confirmed release and receiver activation separately. Advertised disk headroom is clamped by the runtime ledger, server memory resolves nested cgroup-v1/v2 membership, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
-| Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
-| Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
+| Request entry | [`RepositoryCellRouter::route_target`](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs) calls `route_existing` twice around an activation lock, then repeats catalog and control loads for activation. |
+| Metadata lookup | [`CellCatalog::lookup`](../src/cell/catalog/mod.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/control/authority.rs) separately reads exact control. |
+| Local residency | [`CellRuntime::resident_handle`](../src/cell/actor/mod.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/cell/actor/mod.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
+| Sparse hydration | [`Db::prepare_hydration` and `install_hydration`](../../cellule-ltx/src/db/mod.rs) bracket asynchronous fetch; a separate hydration effect permits foreground work and retains drain obligations. Cancellation, overwrite and takeover tests cover the split; fleet latency qualification remains. |
+| Fleet observation | [`NodePublisher`](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/peer.rs) signs short-lived measured capacity and backlog observations; `NodeAdvertisement` carries a versioned placement signature. [`RepositoryCellRouter`](https://github.com/crabbuild/crab/blob/beb439039cb37e750afe6625a2358101c70d1191/crates/crab-http-server/src/cells/router.rs) plans movement from live signed samples and actor-settled candidates, then records confirmed release and receiver activation separately. Advertised disk headroom is clamped by the runtime ledger, server memory resolves nested cgroup-v1/v2 membership, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
+| Existing rendezvous | [`preferred_scanner`](../src/fleet/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
+| Transition safety | [`Control`](../src/control/mod.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination/mod.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
 ### Closed-book LTX telemetry and the prefetch gate
 
@@ -180,6 +234,7 @@ outcomes and bytes returned before failure for cold, sparse, and hydrating
 reads; resident reads increment only the logical counter and perform no
 provider operation. The runtime exports phase result/duration and these finite
 counters for cold, sparse, hydrating, and resident reads.
+
 Cell IDs, paths, object keys, digests, and arbitrary caller strings cannot be
 labels. Root-open, authenticated-directory, frame-fetch, ordered restore-write,
 and compaction paths report success and failure through the same host hook.
@@ -209,7 +264,7 @@ following are verified:
 ### Implementation evidence and remaining qualification
 
 The first implementation slices now have one code path each: the architecture
-guard rejects production `cellule-ltx` imports from the embedding service; the actor
+guard rejects production `cellule-ltx` imports from `crab-http-server`; the actor
 uses a private coordination state machine for admission, scheduling, fencing,
 publication, renewal, migration, inventory refresh, and drain, while the kernel allocates and retires typed
 effect intents/IDs and the actor fences completions by activation generation
@@ -219,7 +274,8 @@ predicates; the simulator's movement release also passes queue/publisher
 observations through the same deactivation gate; resident-only lookup is
 actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
-`Db::hydrate_step` work on the existing SQL worker; active-cell admission
+page selection and installation on the existing SQL worker with asynchronous
+fetch outside it; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, active-Cell
 file-descriptor reservations, bounded SQL-worker, hydration-job, and primitive
 activity/effect reservations, with runtime metrics for hydration and descriptor
@@ -248,6 +304,7 @@ they are provider evidence, not release receipts. Matched warm-restart
 zero-origin latency receipts, complete advertised/metric parity, multi-process
 movement, and protected Kubernetes faults remain release gates. The
 standalone-surface decision is recorded and its execution is in this change.
+
 The cold-activation planner seam
 and its local receiver-failure rollback are implemented locally: a failed
 rooted idle acquisition or fenced-owner takeover releases the takeover through
@@ -287,6 +344,7 @@ The upstream comparison is supported by Celld's pinned
 and
 [`docs/limitations.md`](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/docs/limitations.md).
 
+<a id="detail-05"></a>
 ## Deepen existing modules instead of multiplying surfaces
 
 The design adds implementation behind three narrow interfaces:
@@ -310,6 +368,7 @@ coordination step, route tests enter through `CellRuntime` lookup, and placement
 tests enter through a complete signed fleet observation. Tests must not reach
 past those seams to mutate internal maps or manufacture authority.
 
+<a id="detail-06"></a>
 ## Make coordination deterministic
 
 ### Extract decisions, not storage abstractions
@@ -446,6 +505,7 @@ Rust simulation or real-fleet qualification.
   addition to the happy path.
 - Existing async integration tests remain as adapter and real-I/O proof.
 
+<a id="detail-07"></a>
 ## Make warm resident reads local
 
 ### Put local lookup before remote discovery
@@ -491,18 +551,27 @@ owner endpoints and cold Cells are never served from this local index.
 ### Finish bounded background hydration
 
 Sparse activation remains legal and may begin serving after exact-root
-verification. It is called `ActiveSparse`, not fully resident. Wire
-`Db::hydration` and `hydrate_step` through bounded SQL-worker jobs so an
-active sparse Cell progressively resolves inherited pages while foreground
-work remains prioritized.
+verification. It is called `ActiveSparse`, not fully resident. The actor
+selects up to 64 pages with `Db::prepare_hydration` on its SQL worker,
+fetches authenticated pages asynchronously, then dispatches
+`Db::install_hydration` to that activation. Foreground queries and mutations
+can run while fetch is in flight. Hydration owns a separate effect identity
+that still prevents drain or transfer from releasing an unfinished activation;
+its completion cannot clear another command's foreground slot.
 
 Hydration:
 
 - Reserves incremental local disk before each page batch.
 - Uses existing page-I/O, object-I/O, and job admission.
+- Reserves fetched payload bytes before origin work and carries the reservation
+  through queued installation; canceled callers cannot release live worker bytes.
 - Verifies every directory node, frame, page checksum, and final hydration
   count.
-- Pauses under foreground queue, disk, or object-store pressure.
+- Starts batches only while the Cell's foreground queue and publication are idle.
+- Defers preparation/fetch timeouts and retryable fetch errors for at least one
+  second, honoring longer provider delays. Permanent fetch errors and uncertain
+  or failed installation still fence the owner. Demand reads retain their
+  synchronous VFS contract; shared-worker installation latency remains to qualify.
 - Is cancel-safe on fence and eviction; partial verified pages remain only as
   disposable local state.
 - Promotes the actor to `ActiveResident` only after every inherited allocated
@@ -546,14 +615,15 @@ local-route lookup, actor queue, SQL execution, and full request separately.
   only after complete verified local coverage.
 - Hydration and route acceleration stay within the node memory, disk,
   descriptor, and job envelope.
-- Cellule latency is reported from matched hardware; the Celld fixed-host figures
+- Crab latency is reported from matched hardware; the Celld fixed-host figures
   remain an external baseline until reproduced under the same workload.
 
+<a id="detail-08"></a>
 ## Balance ownership under live pressure
 
 ### Separate placement from authority
 
-Add a private fleet placement controller in the embedding service and a pure
+Add a private fleet placement controller in `crab-http-server` and a pure
 planner in `cellule-runtime`. The planner consumes a signed, revision-pinned
 fleet observation and produces advisory actions. It cannot write Cell control,
 construct an owner, or bypass actor admission.
@@ -600,6 +670,7 @@ The current signed placement schema is version 2. It carries three bounded
 backlog counters: publication pressure in 1 MiB units of retained native work
 and unrooted node-log bytes, plus admitted hydration and primitive job counts.
 An advertisement without a runtime measurement has no signed placement block.
+
 Draining nodes retain a signed block with zero free capacity so donors remain
 visible but cannot receive new Cells. The pure transfer planner caps one
 tick at two Cells and 8 GiB of projected disk restore, with absolute receiver
@@ -634,10 +705,17 @@ may follow the exact root. Live or due source effects, ready or leased Queue
 messages, pending Workflow activities/timers, due Cron delivery, and unknown
 inspection state block movement; the maintenance-release inventory remains
 conservative and unchanged.
+
 The private server controller runs every 15 seconds, samples signed live nodes
 and actor-approved local candidates, then releases exact generations through
 the actor before sending an authenticated receiver activation hint. If receiver
 activation fails, the exact unowned root remains available for normal routing.
+
+Residence evidence survives temporary work or renewal while the activation
+remains resident. A changed activation generation resets it; removal or drain
+discards it. Movement still requires the ordinary 60-second idle window and
+the actor's fresh transfer inspection before release.
+
 Each tick reports confirmed source releases and successful receiver activations
 separately; a started drain is not counted as a completed move.
 The scale-down host state stops new acquisition, paces exact actor releases,
@@ -647,6 +725,7 @@ the existing terminal shutdown only after ownership reaches zero. Measured
 per-Cell disk demand, shared fleet-wide movement accounting, and protected
 provider/Kubernetes evidence remain qualification work before production
 rollout.
+
 The mTLS management listener exposes `POST /internal/cells/v1/scale-down` for
 an operator or orchestrator to request this same drain: `200` means the node
 reached `Stopped`, while `202` reports a bounded incomplete drain that is safe
@@ -702,7 +781,7 @@ that additional hibernation state and uses full release.
 
 ### Move through ordinary recovery
 
-Cellule does not add a direct owner-transfer record. A movement is:
+Crab does not add a direct owner-transfer record. A movement is:
 
 1. Planner proposes a destination and records the fleet snapshot digest.
 2. Current actor rechecks eligibility and enters `Quiescing`.
@@ -743,6 +822,7 @@ preconditions for a clean handoff.
   restore reserve remain within the signed profile thresholds.
 - Fleet drain with one failed receiver remains bounded, observable, and safe.
 
+<a id="detail-09"></a>
 ## Apply the architecture uniformly to native primitives
 
 SQL, KV, Blob, Queue, Workflow, Cron, and effects remain behaviors behind one
@@ -771,6 +851,7 @@ otherwise idle request rate. A Cell that cannot safely quiesce stays owned and
 reports the blocking class; pressure policy may reject new work but never
 silently drops the primitive's durable obligation.
 
+<a id="detail-10"></a>
 ## Stream canonical Cell publication
 
 ### Describe the current allocation
@@ -793,7 +874,11 @@ verification on a blocking worker. The reservation travels with the returned
 overlay until its temporary file is dropped. The node restart inventory counts
 regular files left in stale session directories—including compaction and
 recovery scratch—before admitting new work; it rejects symlinked or special
-entries. Newly encoded node-log overlays still begin in memory and remain a
+entries. Server startup warns with the stale-session count, charged bytes,
+remaining shared disk budget, and budget capacity when earlier session
+directories remain. That reservation is conservative accounting, not cleanup;
+the files stay charged until an exclusive reclaim protocol is proved. Newly
+encoded node-log overlays still begin in memory and remain a
 separate peak-residency qualification item. A 5 GiB Cell is built from bounded
 cuts; its size must not increase the memory used by any later incremental
 append.
@@ -901,6 +986,7 @@ The phase is complete when:
 - Existing exact-root, compaction, follower recovery, and source-loss suites
   remain green.
 
+<a id="detail-11"></a>
 ## Persist only verified directory acceleration
 
 ### Keep authority out of the cache
@@ -949,6 +1035,7 @@ avoids adding a speculative concurrency structure.
 - Cache corruption and eviction cannot change restored bytes.
 - Remote reachability checks do not accept local presence as proof.
 
+<a id="detail-12"></a>
 ## Make resident lifecycle explicit
 
 ### Separate local residency from distributed control
@@ -1035,6 +1122,7 @@ material bottleneck after immutable caching.
 - Hot, immutable-cache-warm, and cold activation have separate measurements.
 - Process restart treats ambiguous mutable files as quarantine, not authority.
 
+<a id="detail-13"></a>
 ## Use one resource envelope
 
 The runtime already shares many admission facilities. Qualification must prove
@@ -1072,6 +1160,7 @@ This phase also qualifies retention at scale:
 - Cross-provider export is implemented before it is advertised as a recovery
   contract.
 
+<a id="detail-14"></a>
 ## Qualify production behavior
 
 ### Define claims before running load
@@ -1160,7 +1249,7 @@ Signed receipts bind the measurements to the exact source, image, Pod UID,
 provider, profile, and completion time. Local unit tests and in-memory object
 stores cannot substitute for these receipts.
 
-### Compare Cellule and Celld fairly
+### Compare Crab and Celld fairly
 
 A comparative benchmark uses identical:
 
@@ -1173,7 +1262,7 @@ A comparative benchmark uses identical:
 
 Exclude V8 and JavaScript handler execution from both measurements. Report
 throughput, latency, resource use, recovery time, and write amplification.
-Cellule may claim an advantage only for a metric demonstrated under the matched
+Crab may claim an advantage only for a metric demonstrated under the matched
 configuration; architectural expectations are not benchmark results.
 
 Compare architecture as well as headline throughput:
@@ -1182,13 +1271,14 @@ Compare architecture as well as headline throughput:
   page faults, and routing cost separately.
 - Run the same seeded fault classes where both protocols expose the seam, and
   publish non-equivalent assumptions rather than normalizing them away.
-- Compare count-weighted placement with Cellule's reservation- and demand-weighted
+- Compare count-weighted placement with Crab's reservation- and demand-weighted
   placement on heterogeneous Cells.
 - Measure convergence, movement amplification, and foreground p99 during node
   addition, node loss, cgroup pressure, and graceful drain.
 - Record model and simulator coverage as assurance evidence, not as a runtime
   performance score.
 
+<a id="detail-15"></a>
 ## Standalone replication contract: hard removal recorded and executed
 
 Commit `4d097cce362` introduced the standalone replication interface and is
@@ -1251,6 +1341,7 @@ standalone data needs migration, an operator must use an explicit offline
 export/import tool with exact-root verification; this change does not delete
 remote data and adds no production fallback reader.
 
+<a id="detail-16"></a>
 ## Deliver in dependency order
 
 Each change is independently reviewable and leaves one canonical path.
@@ -1279,10 +1370,14 @@ The streaming work and standalone deletion are now separate reviewable commits;
 canonical Cell tests own the retained invariants, and no standalone test owner
 or compatibility facade remains.
 
-Slice 1 implementation evidence: `python3 scripts/check-boundaries.py` enforces
-the crate layers, the pure coordination kernel, and the LTX hard cut. It rejects
-the retired standalone LTX epoch-head symbols in `cellule-ltx` while admitting
-Cell-scoped names. Existing actor/publication tests already cover the
+Slice 1 implementation evidence: `make architecture-check` now includes an
+explicit Cell composition guard. It verifies that `crab-http-server` keeps
+`cellule-ltx` dev-only and rejects direct `cellule_ltx::` use in production source,
+while admitting `#[cfg(test)]` modules and dedicated `tests.rs` fixtures. The
+guard's temporary-tree regressions live in
+`crab/scripts/test_check_architecture_gates.py` under
+`CellRuntimeBoundaryTests`; the same gate rejects the retired standalone LTX
+epoch-head symbols while admitting Cell-scoped names. Existing actor/publication tests already cover the
 required acknowledgement, fence, shutdown, and lost-CAS characterization
 cases; no duplicate runtime tests were added. Local Cargo qualification now
 passes on the required external workspace target volume; provider, Kubernetes,
@@ -1313,25 +1408,26 @@ admission wired; complete advertised/metric parity, cold-placement execution,
     artifact binding, fault/artifact/ownership evidence, runner emission, and
     exact source/image release binding implemented.
 
+<a id="detail-17"></a>
 ## Verify every slice
 
 Use one worktree-specific external Cargo target directory.
 
 ```bash
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo test -p cellule-ltx --locked
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo test -p cellule-ltx --features replica --locked
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo test -p cellule-runtime --locked
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
-  cargo test -p cellule-app --locked
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo test -p crab-http-server --locked
 
-CARGO_TARGET_DIR=$HOME/Workspace/cellulebuild-target/cellule-main \
-  cargo clippy -p cellule-ltx -p cellule-runtime -p cellule-app -p cellule-host \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo clippy -p cellule-ltx -p cellule-runtime -p crab-http-server \
   --all-targets --locked -- -D warnings
 
 node crates/cellule-runtime/docs/validate.mjs
@@ -1347,6 +1443,7 @@ Compilation and unit tests are necessary but not production qualification. Run
 the real RustFS, Compose, Kubernetes, provider, and signed-receipt gates described
 in [delivery.md](delivery.md) before changing readiness claims.
 
+<a id="detail-18"></a>
 ## Reject these shortcuts
 
 - Raising `Limits` without removing resident allocations.
@@ -1369,8 +1466,9 @@ in [delivery.md](delivery.md) before changing readiness claims.
 - Adding another configuration mode for standalone versus Cell publication.
 - Keeping aliases or dual readers after an approved hard cut.
 - Deleting standalone tests before moving their unique proof.
-- Comparing Cellule and Celld with different durability or object-store conditions.
+- Comparing Crab and Celld with different durability or object-store conditions.
 
+<a id="detail-19"></a>
 ## Declare completion precisely
 
 The canonical scaling design is complete only when:
@@ -1394,5 +1492,5 @@ The canonical scaling design is complete only when:
    epoch-head fallback.
 10. Documentation describes measured results rather than target capacity.
 
-Until those conditions hold, describe Cellule Cell Runtime as functionally complete
+Until those conditions hold, describe Crab Cell Runtime as functionally complete
 but not production-qualified at the target scale.

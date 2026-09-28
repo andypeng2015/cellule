@@ -1,5 +1,17 @@
-# cellule-host
+# AGENTS.md
 
-Owns exactly one runtime, node admission, facility/task lifecycle, drain, and shutdown for a compiled application. The embedding service supplies provider adapters, peer transport, authorization, and deployment policy. Keep cancellation and resource-release ordering explicit; no background task may outlive host shutdown unnoticed.
+Scoped rules for `crates/cellule-host/`. Root guidance applies.
 
-Read `src/lib.rs` and host tests before changing lifecycle APIs. Run `cargo test -p cellule-host --locked` and a reference application smoke when wiring changes.
+- This is a provider-neutral lifecycle facade. HTTP, auth, provider
+  construction, and user authorization stay in product crates.
+- One `CellNode` owns one `CellRuntime`; do not add a second scheduler,
+  authority, publisher, or durability path here.
+- Builder validation must fail before starting the runtime. Shutdown and drain
+  must await the runtime and be safe to call once.
+- A node keeps one drain lane: concurrent scale-down and shutdown callers queue
+  on it, and a caller's deadline bounds the releases it starts rather than the
+  wait for the lane. Fleet-level pacing stays with the planner's movement
+  budget, so do not add a second per-node rate limit here.
+- Layout: the integration suite is `tests/node.rs` (with `tests/node/`). The
+  crate uses integration suites for public lifecycle behavior.
+- Run `python3 scripts/check-module-layout.py` after layout changes.

@@ -16,9 +16,10 @@ LAYERS = {
     "cellule-runtime": {"cellule-ltx", "cellule-store"},
     "cellule-app": {"cellule-runtime"},
     "cellule-host": {"cellule-app", "cellule-runtime"},
+    "cellule-peer-http": {"cellule-runtime"},
 }
-KERNEL = ROOT / "crates/cellule-runtime/src/coordination.rs"
-ACTOR = ROOT / "crates/cellule-runtime/src/actor.rs"
+KERNEL = ROOT / "crates/cellule-runtime/src/coordination/mod.rs"
+ACTOR = ROOT / "crates/cellule-runtime/src/cell/actor/mod.rs"
 FORBIDDEN_KERNEL = (
     "async fn", ".await", "tokio::", "object_store", "rusqlite",
     "reqwest::", "std::fs", "std::net", "std::time", "rand::",
@@ -47,7 +48,7 @@ def main() -> int:
                 problems.append(f"{name} must use the local {dependency_name} workspace crate")
 
     kernel = KERNEL.read_text()
-    actor = ACTOR.read_text()
+    actor = "\n".join(path.read_text() for path in [ACTOR, *ACTOR.parent.rglob("*.rs")])
     for required in (
         "pub(crate) enum CoordinationInput", "pub(crate) enum CoordinationDecision",
         "pub(crate) struct CoordinationState", "pub(crate) fn step(&mut self, input: CoordinationInput)",
@@ -56,7 +57,7 @@ def main() -> int:
             problems.append(f"coordination kernel lost {required}")
     for number, line in enumerate(kernel.splitlines(), 1):
         if any(pattern in line for pattern in FORBIDDEN_KERNEL):
-            problems.append(f"coordination.rs:{number}: adapter dependency in pure kernel")
+            problems.append(f"coordination/mod.rs:{number}: adapter dependency in pure kernel")
     for required in ("CoordinationState", "coordination.step(CoordinationInput::"):
         if required not in actor:
             problems.append(f"actor lost coordination adapter {required}")
@@ -65,7 +66,9 @@ def main() -> int:
     for base in (ROOT / "crates/cellule-ltx/src", ROOT / "crates/cellule-ltx/examples"):
         for source in base.rglob("*.rs"):
             for number, line in enumerate(source.read_text().splitlines(), 1):
-                if source.name == "cell_layout.rs" and "catalog/{shard:02x}/head.json" in line:
+                if line.lstrip().startswith("//"):
+                    continue
+                if source.name == "cell_layout.rs" and "/{shard:02x}/head.json" in line:
                     continue
                 if retired.search(line):
                     problems.append(f"{source.relative_to(ROOT)}:{number}: retired LTX surface")

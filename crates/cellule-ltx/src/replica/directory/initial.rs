@@ -1,7 +1,7 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
-
 use crate::{CellObjectKind, LtxError, Result};
+use futures_util::{Stream, StreamExt as _};
 
+use super::super::merge::LocatorMerge;
 use super::super::{CellReplica, DirectoryInput, OBJECT_UPLOAD_CONCURRENCY};
 use super::{DirectoryEntry, DirectoryTree, FANOUT, Node, encode_branch, encode_leaf};
 
@@ -45,99 +45,52 @@ impl<'a> IndexCursor<'a> {
 
 pub(in crate::replica) struct Entries<'a> {
     cursors: Vec<IndexCursor<'a>>,
-    heap: BinaryHeap<Reverse<(u32, usize)>>,
-    valid_through: Vec<u32>,
-    failed: bool,
+    merge: LocatorMerge,
 }
 
 pub(in crate::replica) fn entries(inputs: &[DirectoryInput]) -> Result<Entries<'_>> {
     if inputs.is_empty() {
         return Err(LtxError::LTXCorrupted);
     }
-    // A later truncation invalidates every older locator above its boundary.
-    // Suffix minima let the merge discard those locators without a page map.
-    let mut valid_through = vec![0; inputs.len()];
-    let mut suffix_min = u32::MAX;
-    for (index, input) in inputs.iter().enumerate().rev() {
-        suffix_min = suffix_min.min(input.descriptor.info.database_pages);
-        valid_through[index] = suffix_min;
-    }
+    let mut merge = LocatorMerge::new(
+        inputs
+            .iter()
+            .map(|input| input.descriptor.info.database_pages),
+    );
     let mut cursors = Vec::with_capacity(inputs.len());
-    let mut heap = BinaryHeap::new();
     for input in inputs {
         let cursor = IndexCursor::new(input)?;
-        let index = cursors.len();
         if let Some(entry) = &cursor.current {
-            heap.push(Reverse((entry.page, index)));
+            merge.push(cursors.len(), entry.page);
         }
         cursors.push(cursor);
     }
-    Ok(Entries {
-        cursors,
-        heap,
-        valid_through,
-        failed: false,
-    })
-}
-
-impl Entries<'_> {
-    fn take_current(&mut self, index: usize) -> Result<DirectoryEntry> {
-        let cursor = self.cursors.get_mut(index).ok_or(LtxError::LTXCorrupted)?;
-        let entry = cursor.current.take().ok_or(LtxError::LTXCorrupted)?;
-        cursor.advance()?;
-        if let Some(next) = &cursor.current {
-            self.heap.push(Reverse((next.page, index)));
-        }
-        Ok(entry)
-    }
+    Ok(Entries { cursors, merge })
 }
 
 impl Iterator for Entries<'_> {
     type Item = Result<DirectoryEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return None;
-        }
+        let Self { cursors, merge } = self;
         loop {
-            let Reverse((page, first_index)) = self.heap.pop()?;
-            let mut selected = None;
-            let mut index = first_index;
-            loop {
-                let entry = match self.take_current(index) {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        self.failed = true;
-                        self.heap.clear();
-                        return Some(Err(error));
-                    }
-                };
-                if page <= self.valid_through[index]
-                    && selected
-                        .as_ref()
-                        .is_none_or(|(selected_index, _)| index > *selected_index)
-                {
-                    // The newest surviving cut is the authoritative locator.
-                    selected = Some((index, entry));
-                }
-                let Some(Reverse((next_page, next_index))) = self.heap.peek().copied() else {
-                    break;
-                };
-                if next_page != page {
-                    break;
-                }
-                self.heap.pop();
-                index = next_index;
-            }
-            if let Some((_, entry)) = selected {
-                return Some(Ok(entry));
+            let next = merge.next_group(|index| {
+                let cursor = cursors.get_mut(index).ok_or(LtxError::LTXCorrupted)?;
+                let entry = cursor.current.take().ok_or(LtxError::LTXCorrupted)?;
+                cursor.advance()?;
+                Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
+            })?;
+            match next {
+                Ok(None) => continue,
+                Ok(Some(entry)) => return Some(Ok(entry)),
+                Err(error) => return Some(Err(error)),
             }
         }
     }
 }
 
 pub(in crate::replica) async fn build_and_upload(
-    entries: impl Iterator<Item = Result<DirectoryEntry>>,
+    entries: impl Stream<Item = Result<DirectoryEntry>>,
     page_size: u32,
     database_pages: u32,
     replica: &CellReplica,
@@ -152,7 +105,8 @@ pub(in crate::replica) async fn build_and_upload(
     let mut leaf_entries = Vec::with_capacity(FANOUT);
     let mut nodes = Vec::new();
     let mut pending = Vec::with_capacity(OBJECT_UPLOAD_CONCURRENCY);
-    for entry in entries {
+    futures_util::pin_mut!(entries);
+    while let Some(entry) = entries.next().await {
         let entry = entry?;
         if expected_page == u64::from(lock) {
             expected_page += 1;

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 390" role="img" aria-labelledby="title description">
+  <title id="title">Cellule qualification and release evidence</title>
+  <desc id="description">Cellule's exact source revision and tracked profiles feed contract, model, property, and fuzz checks. A reference Compose application proves typed actions and durable read-back against object storage. A separate controlled runner produces protected provider and fault evidence. The embedding product release verifies the pinned Cellule profiles and receipts against its own source revision and image digest.</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .title { fill: #f8fafc; font-size: 23px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 13px; }
+      .label { fill: #f8fafc; font-size: 16px; font-weight: 650; text-anchor: middle; }
+      .detail { fill: #cbd5e1; font-size: 12px; text-anchor: middle; }
+      .lane { font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+    </style>
+    <marker id="arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 9 3.5 0 7Z" fill="#94a3b8"/>
+    </marker>
+    <marker id="violet" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 9 3.5 0 7Z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <rect width="1060" height="390" rx="18" fill="#0f172a"/>
+  <text x="30" y="42" class="title">From source contracts to release evidence</text>
+  <text x="30" y="65" class="subtitle">Each stage adds proof; local success does not replace a protected provider run.</text>
+
+  <rect x="25" y="86" width="725" height="165" rx="14" fill="#102535" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="43" y="109" class="lane" fill="#22d3ee">CELLULE SOURCE + ROUTINE CI</text>
+  <rect x="775" y="86" width="260" height="165" rx="14" fill="#251d3b" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="793" y="109" class="lane" fill="#a78bfa">CONTROLLED ENVIRONMENT</text>
+
+  <path d="M230 171 H260" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M490 171 H520" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M725 171 H800" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#violet)"/>
+  <path d="M905 220 V285" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#violet)"/>
+
+  <rect x="45" y="130" width="185" height="90" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="137" y="162" class="label">Exact revision</text>
+  <text x="137" y="184" class="detail">locked source + profiles</text>
+  <rect x="260" y="130" width="230" height="90" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="375" y="162" class="label">Mechanics</text>
+  <text x="375" y="184" class="detail">contracts · model · property · fuzz</text>
+  <rect x="520" y="130" width="205" height="90" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="622" y="162" class="label">Reference Compose</text>
+  <text x="622" y="184" class="detail">typed action → read-back</text>
+  <rect x="800" y="130" width="210" height="90" rx="10" fill="#372849" stroke="#a78bfa"/>
+  <text x="905" y="162" class="label">Protected matrix</text>
+  <text x="905" y="184" class="detail">provider + fault receipts</text>
+
+  <rect x="260" y="285" width="750" height="72" rx="11" fill="#12302d" stroke="#34d399" stroke-width="1.5"/>
+  <text x="635" y="313" class="label">Embedding product release</text>
+  <text x="635" y="336" class="detail">verify pinned Cellule contracts and signed evidence · bind product source + image digest</text>
+</svg>

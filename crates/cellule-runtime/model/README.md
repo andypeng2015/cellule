@@ -1,7 +1,7 @@
 # Cell coordination model
 
 This directory contains the bounded TLA+ safety model for the private
-coordination kernel in `../src/coordination.rs`. It is a reviewable protocol
+coordination kernel in `../src/coordination/mod.rs`. It is a reviewable protocol
 model, not a model of SQLite, provider behavior, cryptographic signing, HTTP,
 or the primitive schemas.
 
@@ -10,7 +10,11 @@ or the primitive schemas.
 The model is maintained with the Rust kernel at the current source revision.
 The CI workflow records that revision alongside every broad result. The TLC
 runner downloads only the official `v1.8.0` artifact named in `toolchain.env`,
-verifies its SHA-256 digest, and fails closed on a mismatch.
+verifies its manifest provenance (`Implementation-Title`, vendor, and the
+`tlc2/TLC.class` entry), and fails closed on a mismatch. Upstream rebuilds and
+re-uploads that asset in place, so the runner logs the exact build revision
+instead of pinning mutable bytes; set `CELLULE_TLC_SHA256` to pin an exact
+digest where reproducibility matters.
 
 ```text
 crates/cellule-runtime/model/check.sh fast

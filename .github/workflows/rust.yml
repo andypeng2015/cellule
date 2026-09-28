@@ -10,7 +10,21 @@ permissions:
 
 jobs:
   workspace:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    services:
+      rustfs:
+        image: ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
+        env:
+          # Disposable CI fixture credentials; never use them for a deployment.
+          RUSTFS_ACCESS_KEY: cellule-ci
+          RUSTFS_SECRET_KEY: cellule-integration-fixture
+          RUSTFS_CONSOLE_ENABLE: "false"
+          RUSTFS_OBS_LOG_DIRECTORY: /data/logs
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl --fail --silent http://127.0.0.1:9000/health/ready"
+          --health-interval 3s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -25,28 +39,47 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Architecture boundaries
-        run: python3 scripts/check-boundaries.py
+        run: |
+          python3 scripts/check-boundaries.py
+          python3 scripts/check-module-layout.py
+          python3 scripts/check-doc-rust-fences.py
+          python3 scripts/check-doc-links.py
       - name: Check
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --all-features --locked
       - name: Documentation links
         run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
       - name: Run orders example
         run: cargo run -p cellule-app --example orders --locked
-      - name: Run carts example
-        run: cargo run -p cellule-app --example carts --locked
-      - name: Run notifications example
-        run: cargo run -p cellule-app --example notifications --locked
-      - name: Run fulfillment example
-        run: cargo run -p cellule-app --example fulfillment --locked
-      - name: Run invoices example
-        run: cargo run -p cellule-app --example invoices --locked
-      - name: Run balanced three-process storefront smoke
+      - name: Run attachments example
+        run: cargo run -p cellule-app --example attachments --locked
+      - name: Compile application descriptor example
+        run: cargo run -p cellule-app --example application_descriptor --locked
+      - name: Create isolated RustFS bucket
+        env:
+          AWS_ACCESS_KEY_ID: cellule-ci
+          AWS_SECRET_ACCESS_KEY: cellule-integration-fixture
+          AWS_DEFAULT_REGION: us-east-1
         run: |
-          CELLULE_PERF_ITERATIONS=1 cargo test -p cellule-app --test reference_application \
-            process_performance::reference_balanced_three_process_fleet_end_to_end_performance \
+          aws --endpoint-url http://127.0.0.1:9000 s3api create-bucket --bucket cellule-ci
+      - name: Run balanced three-process storefront smoke
+        env:
+          AWS_ACCESS_KEY_ID: cellule-ci
+          AWS_SECRET_ACCESS_KEY: cellule-integration-fixture
+          AWS_EC2_METADATA_DISABLED: "true"
+          CELLULE_TEST_ENDPOINT: http://127.0.0.1:9000
+          CELLULE_TEST_BUCKET: cellule-ci
+          CELLULE_TEST_PREFIX: reference-smoke
+          CELLULE_PERF_ITERATIONS: "1"
+        run: |
+          smoke_test=process_performance::reference_balanced_three_process_fleet_end_to_end_performance
+          cargo test -p cellule-app --test integration "$smoke_test" \
+            --locked -- --ignored --exact --list | grep -Fx "$smoke_test: test"
+          cargo test -p cellule-app --test integration "$smoke_test" \
             --locked -- --ignored --exact --nocapture
+      - name: Test local LTX without replica
+        run: cargo test -p cellule-ltx --no-default-features --locked
       - name: Test replica feature
         run: cargo test -p cellule-ltx --features replica --locked
       - name: Lint
@@ -55,7 +88,7 @@ jobs:
         run: node crates/cellule-runtime/docs/validate.mjs
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -64,4 +97,4 @@ jobs:
         with:
           toolchain: 1.97.0
       - name: Check Rust 1.97 minimum
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --all-features --locked

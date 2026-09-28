@@ -1,5 +1,5 @@
 // Contains adapted Celld lib.rs source at the revision in UPSTREAM.md.
-// Apache-2.0; modified by Crab contributors. See LICENSE.
+// Apache-2.0; Cellule owns this adaptation. See LICENSE and UPSTREAM.md.
 
 //! Local SQLite WAL capture and exact, checksum-verified LTX recovery.
 //!
@@ -8,17 +8,38 @@
 //! authenticated bundles, compaction, and sparse paged SQL. Leases and HTTP
 //! policy remain caller-owned.
 
+#![deny(missing_docs)]
+// Production panics can abandon accepted work and persistence resources; tests
+// retain assertions while runtime paths propagate typed errors.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 #![doc = include_str!("../README.md")]
 
-mod capture;
+pub mod capture;
 #[cfg(feature = "replica")]
 mod cell_layout;
 mod codec;
 mod commit;
-mod db;
+pub mod db;
 pub mod environment;
-mod error;
+pub mod error;
+#[cfg(feature = "replica")]
+mod hex;
 mod host;
+/// Unstable inspection surface for external fuzzers, auditors, and tools.
+///
+/// Nothing here carries a compatibility guarantee; production callers use the
+/// typed APIs instead.
+#[doc(hidden)]
+pub mod internal;
 #[cfg(feature = "replica")]
 pub use cell_layout::{CellObjectKind, CellStorageLayout};
 #[cfg(feature = "replica")]
@@ -32,8 +53,10 @@ pub use environment::{
 mod ltx;
 mod lz4_block;
 mod pages;
-mod recovery;
-mod types;
+pub mod recovery;
+#[cfg(feature = "replica")]
+mod resume;
+pub mod types;
 mod wal;
 
 #[cfg(feature = "replica")]
@@ -54,8 +77,8 @@ mod writable_vfs;
 pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
 pub use replica::{
-    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RecoveryOverlay,
-    RootObjectRef, RootRef, VerifiedRoot,
+    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, PublicationCost,
+    ReadOnlyRoot, RecoveryOverlay, RootObjectRef, RootRef, VerifiedRoot,
 };
 #[cfg(feature = "replica")]
 pub use writable_vfs::Hydration;
@@ -65,7 +88,7 @@ mod format_tests;
 
 pub use capture::CheckpointMode;
 pub use db::{Db, MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS};
-pub use error::{LtxError, QueryError, Result, TransactionError};
+pub use error::{FailureClass, LimitKind, LtxError, QueryError, Result, TransactionError};
 pub use recovery::{VerifiedPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};
