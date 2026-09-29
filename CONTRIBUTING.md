@@ -38,3 +38,5 @@ Put provider-neutral transport in `cellule-store`, SQLite/LTX mechanics in `cell
 Cell IDs, object paths, LTX data, descriptors, schema versions, and signed peer messages are persisted or exchanged contracts. Before changing one, read its writer, reader, tests, and migration path. Add a runnable example or update the quickstart when author-facing behavior changes. Keep tests focused on observable behavior and failure recovery.
 
 The [qualification guide](crates/cellule-runtime/qualification/README.md) separates local contract checks from provider, multi-process, and production evidence. Do not present a local smoke or synthetic receipt as production qualification. Do not add credentials or generated qualification artifacts to a PR.
+
+For SemVer rules, matched workspace versioning, and crates.io publication, see the [release guide](docs/releasing.md).

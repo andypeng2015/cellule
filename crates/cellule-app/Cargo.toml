@@ -3,7 +3,7 @@ name = "cellule-app"
 autoexamples = false
 # Integration modules live directly in tests/; only these two files are targets.
 autotests = false
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
