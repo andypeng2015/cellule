@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -44,6 +45,8 @@ jobs:
           python3 scripts/check-module-layout.py
           python3 scripts/check-doc-rust-fences.py
           python3 scripts/check-doc-links.py
+      - name: Release metadata
+        run: python3 scripts/release.py check
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Documentation links
@@ -86,6 +89,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Validate SQL and peer contracts
         run: node crates/cellule-runtime/docs/validate.mjs
+      - name: Package the independent bootstrap crate
+        run: cargo package -p cellule-types --locked
 
   msrv:
     runs-on: ubuntu-24.04
