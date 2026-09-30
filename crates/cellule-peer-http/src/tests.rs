@@ -260,6 +260,106 @@ async fn owner_lookup_fixture_with_endpoint(
 }
 
 #[tokio::test]
+async fn routing_table_shares_owner_hints_with_the_round_trip() {
+    let (transport, target, counted) = owner_lookup_fixture().await;
+    let table = transport.routes();
+    assert!(matches!(
+        table.route(&target).await.unwrap(),
+        RouteDecision::Remote(_)
+    ));
+    assert_eq!(counted.counts().body_requests(), 2);
+    counted.reset();
+    // The forwarding path reuses the route the table already resolved.
+    assert_eq!(
+        transport.owner(&target).await.unwrap().session,
+        SessionId::from_bytes([26; 16])
+    );
+    assert_eq!(counted.counts().body_requests(), 0);
+    // A refusal drops the hint for both readers.
+    table.invalidate(&target, SessionId::from_bytes([26; 16]));
+    counted.reset();
+    assert!(matches!(
+        table.route(&target).await.unwrap(),
+        RouteDecision::Remote(_)
+    ));
+    assert!(counted.counts().body_requests() > 0);
+}
+
+#[tokio::test]
+async fn routing_table_reports_remote_routes_with_their_lease() {
+    let (transport, target, _counted) = owner_lookup_fixture().await;
+    let table = transport.routes();
+    let RouteDecision::Remote(route) = table.route(&target).await.unwrap() else {
+        panic!("fixture owner must be a remote route");
+    };
+    assert_eq!(route.session(), SessionId::from_bytes([26; 16]));
+    assert_eq!(route.endpoint().host_str(), Some("owner.example"));
+    assert_eq!(route.certificate(), Digest::from_bytes([23; 32]));
+    assert!(route.is_live_at(now_ms().unwrap()));
+}
+
+#[tokio::test]
+async fn routing_table_reports_local_and_unowned_cells() {
+    let (transport, target, counted) = owner_lookup_fixture().await;
+    let table = transport.routes();
+
+    let observed = transport
+        .hints
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let local = observed
+        .value()
+        .takeover(Owner {
+            session: transport.session,
+            endpoint: "https://self.internal:8081".into(),
+        })
+        .unwrap();
+    transport
+        .hints
+        .authority
+        .transition(&observed, local, Transition::Takeover)
+        .await
+        .unwrap();
+    counted.reset();
+    // Ownership by this session is a transition, so it rests on an exact
+    // control observation rather than a hint.
+    assert!(matches!(
+        table.route(&target).await.unwrap(),
+        RouteDecision::Local
+    ));
+    assert_eq!(counted.counts().body_requests(), 1);
+
+    let observed = transport
+        .hints
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tombstoned = observed.value().clone();
+    tombstoned.epoch += 1;
+    tombstoned.revision += 1;
+    tombstoned.progress += 1;
+    tombstoned.state = ControlState::Tombstoned;
+    tombstoned.owner = None;
+    transport
+        .hints
+        .authority
+        .transition(&observed, tombstoned, Transition::Tombstone)
+        .await
+        .unwrap();
+    counted.reset();
+    assert!(matches!(
+        table.route(&target).await.unwrap(),
+        RouteDecision::Unowned
+    ));
+    assert_eq!(counted.counts().body_requests(), 1);
+}
+
+#[tokio::test]
 async fn exact_owner_lookup_reads_control_and_signed_session() {
     let (transport, target, counted) = owner_lookup_fixture().await;
     let owner = transport.owner(&target).await.unwrap();
@@ -293,11 +393,13 @@ async fn invalidated_hint_resolves_a_signed_owner_after_authority_takeover() {
     )
     .unwrap();
     transport
+        .hints
         .directory
         .create(successor.clone(), now)
         .await
         .unwrap();
     let observed = transport
+        .hints
         .authority
         .load(target.cell_id())
         .await
@@ -311,6 +413,7 @@ async fn invalidated_hint_resolves_a_signed_owner_after_authority_takeover() {
         })
         .unwrap();
     transport
+        .hints
         .authority
         .transition(&observed, next, Transition::Takeover)
         .await
@@ -318,7 +421,9 @@ async fn invalidated_hint_resolves_a_signed_owner_after_authority_takeover() {
     counted.reset();
     assert_eq!(transport.owner(&target).await.unwrap().session, old.session);
     assert_eq!(counted.counts().body_requests(), 0);
-    transport.invalidate_owner(target.cell_id(), old.session);
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), old.session);
     assert_eq!(
         transport.owner(&target).await.unwrap().session,
         successor.session()
@@ -332,13 +437,21 @@ async fn retired_owner_session_fails_closed_after_hint_invalidation() {
     let owner = transport.owner(&target).await.unwrap();
     let now = now_ms().unwrap();
     let enrolled = transport
+        .hints
         .directory
         .load(owner.session, now)
         .await
         .unwrap()
         .unwrap();
-    transport.directory.withdraw(&enrolled, now).await.unwrap();
-    transport.invalidate_owner(target.cell_id(), owner.session);
+    transport
+        .hints
+        .directory
+        .withdraw(&enrolled, now)
+        .await
+        .unwrap();
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), owner.session);
     counted.reset();
     assert!(transport.owner(&target).await.is_err());
     assert_eq!(counted.counts().body_requests(), 2);
@@ -349,6 +462,7 @@ async fn tombstoned_cell_is_not_routed_from_an_invalidated_hint() {
     let (transport, target, counted) = owner_lookup_fixture().await;
     let old = transport.owner(&target).await.unwrap();
     let observed = transport
+        .hints
         .authority
         .load(target.cell_id())
         .await
@@ -361,11 +475,14 @@ async fn tombstoned_cell_is_not_routed_from_an_invalidated_hint() {
     next.state = ControlState::Tombstoned;
     next.owner = None;
     transport
+        .hints
         .authority
         .transition(&observed, next, Transition::Tombstone)
         .await
         .unwrap();
-    transport.invalidate_owner(target.cell_id(), old.session);
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), old.session);
     counted.reset();
     assert!(matches!(
         transport.owner(&target).await,
@@ -395,10 +512,14 @@ async fn owner_hint_is_shared_scoped_and_invalidated_by_session() {
     ));
     assert_eq!(counted.counts().body_requests(), 2);
 
-    transport.invalidate_owner(target.cell_id(), SessionId::from_bytes([32; 16]));
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), SessionId::from_bytes([32; 16]));
     clone.owner(&target).await.unwrap();
     assert_eq!(counted.counts().body_requests(), 2);
-    transport.invalidate_owner(target.cell_id(), owner.session);
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), owner.session);
     clone.owner(&target).await.unwrap();
     assert_eq!(counted.counts().body_requests(), 4);
 }
@@ -415,7 +536,7 @@ async fn delayed_old_lookup_cannot_replace_new_owner_hint() {
         certificate: Digest::from_bytes([34; 32]),
         public_key: [35; 32],
     };
-    transport.remember_owner(
+    transport.hints.remember_owner(
         target.cell_id(),
         peer.clone(),
         now + 10_000,
@@ -426,13 +547,17 @@ async fn delayed_old_lookup_cannot_replace_new_owner_hint() {
         session: SessionId::from_bytes([36; 16]),
         ..peer
     };
-    transport.remember_owner(target.cell_id(), old, now + 10_000, now, old_started);
+    transport
+        .hints
+        .remember_owner(target.cell_id(), old, now + 10_000, now, old_started);
     assert_eq!(
         transport.owner(&target).await.unwrap().session,
         peer.session
     );
-    transport.invalidate_owner(target.cell_id(), peer.session);
-    transport.remember_owner(
+    transport
+        .hints
+        .invalidate_owner(target.cell_id(), peer.session);
+    transport.hints.remember_owner(
         target.cell_id(),
         RemotePeer {
             session: SessionId::from_bytes([36; 16]),
@@ -446,6 +571,7 @@ async fn delayed_old_lookup_cannot_replace_new_owner_hint() {
     );
     assert!(
         transport
+            .hints
             .owners
             .lock()
             .unwrap()
@@ -466,7 +592,9 @@ async fn near_expired_owner_lease_is_not_cached() {
         certificate: Digest::from_bytes([38; 32]),
         public_key: [39; 32],
     };
-    transport.remember_owner(target.cell_id(), peer, now + 500, now, Instant::now());
+    transport
+        .hints
+        .remember_owner(target.cell_id(), peer, now + 500, now, Instant::now());
     assert_eq!(
         transport.owner(&target).await.unwrap().session,
         SessionId::from_bytes([26; 16])
@@ -475,16 +603,23 @@ async fn near_expired_owner_lease_is_not_cached() {
 }
 
 #[tokio::test]
-async fn expired_owner_hint_forces_exact_lookup_for_concurrent_callers() {
+async fn stale_owner_hint_is_served_while_one_refresh_runs() {
     let (transport, target, counted) = owner_lookup_fixture().await;
-    transport.owner(&target).await.unwrap();
+    let owner = transport.owner(&target).await.unwrap();
     transport
+        .hints
         .owners
         .lock()
         .unwrap()
         .get_mut(&target.cell_id())
         .unwrap()
         .expires_at = Instant::now() - Duration::from_millis(1);
+    // The hint is past its refresh window but still inside the signed lease.
+    let stale = transport
+        .hints
+        .cached_owner(target.cell_id(), now_ms().unwrap())
+        .expect("the served hint must stay cached");
+    assert!(!stale.fresh, "the hint must be past its refresh window");
     counted.reset();
     let calls = (0..5).map(|_| {
         let transport = transport.clone();
@@ -497,8 +632,58 @@ async fn expired_owner_hint_forces_exact_lookup_for_concurrent_callers() {
             .iter()
             .all(|owner| owner.session == owners[0].session)
     );
-    assert!(counted.counts().body_requests() >= 2);
-    assert!(counted.counts().body_requests() <= 10);
+    assert_eq!(owners[0].session, owner.session);
+    // One background refresh revalidates the hint; concurrent callers share it
+    // instead of each paying a synchronous control-and-session lookup.
+    let mut refreshed = false;
+    for _ in 0..200 {
+        if transport
+            .hints
+            .cached_owner(target.cell_id(), now_ms().unwrap())
+            .is_some_and(|route| route.fresh)
+        {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(refreshed, "background refresh did not revalidate the hint");
+    assert_eq!(counted.counts().body_requests(), 1);
+}
+
+#[tokio::test]
+async fn background_refresh_reuses_the_enrolled_session_record() {
+    let (transport, target, counted) = owner_lookup_fixture().await;
+    transport.owner(&target).await.unwrap();
+    assert_eq!(counted.counts().body_requests(), 2);
+    counted.reset();
+    // A hint refresh reuses the enrolled record and reads only control.
+    let reused = transport
+        .hints
+        .lookup_owner(
+            transport.scope.as_ref(),
+            transport.session,
+            &target,
+            SessionReuse::Reuse,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(reused, OwnerLookup::Remote(_, _)));
+    assert_eq!(counted.counts().body_requests(), 1);
+    counted.reset();
+    // A synchronous lookup still proves enrollment from the signed record.
+    let verified = transport
+        .hints
+        .lookup_owner(
+            transport.scope.as_ref(),
+            transport.session,
+            &target,
+            SessionReuse::Verify,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(verified, OwnerLookup::Remote(_, _)));
+    assert_eq!(counted.counts().body_requests(), 2);
 }
 
 #[tokio::test]
@@ -509,7 +694,7 @@ async fn owner_hint_cache_stays_bounded() {
     for index in 0..MAX_OWNER_HINTS + 32 {
         let mut bytes = [0; 32];
         bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
-        transport.remember_owner(
+        transport.hints.remember_owner(
             CellId::from_bytes(bytes),
             owner.clone(),
             now + 10_000,
@@ -517,7 +702,10 @@ async fn owner_hint_cache_stays_bounded() {
             Instant::now(),
         );
     }
-    assert_eq!(transport.owners.lock().unwrap().len(), MAX_OWNER_HINTS);
+    assert_eq!(
+        transport.hints.owners.lock().unwrap().len(),
+        MAX_OWNER_HINTS
+    );
 }
 
 #[tokio::test]
@@ -549,7 +737,9 @@ async fn ambiguous_peer_response_does_not_retry_cached_route() {
         certificate: Digest::from_bytes([23; 32]),
         public_key: [27; 32],
     };
-    transport.remember_owner(target.cell_id(), peer, now + 10_000, now, Instant::now());
+    transport
+        .hints
+        .remember_owner(target.cell_id(), peer, now + 10_000, now, Instant::now());
     assert!(matches!(
         transport.send_inner(target.clone(), vec![1], 1_000).await,
         Err(CellError::PeerTransportUnknown { .. })
@@ -558,6 +748,7 @@ async fn ambiguous_peer_response_does_not_retry_cached_route() {
     assert_eq!(counted.counts().body_requests(), 0);
     assert!(
         transport
+            .hints
             .owners
             .lock()
             .unwrap()
@@ -600,7 +791,9 @@ async fn cancelled_send_releases_owner_hint_for_next_request() {
         certificate: Digest::from_bytes([23; 32]),
         public_key: [27; 32],
     };
-    transport.remember_owner(target.cell_id(), owner, now + 10_000, now, Instant::now());
+    transport
+        .hints
+        .remember_owner(target.cell_id(), owner, now + 10_000, now, Instant::now());
     let sender = transport.clone();
     let request_target = target.clone();
     let request =
@@ -646,7 +839,9 @@ async fn not_started_refusal_refreshes_authority_without_resending_to_stale_peer
         certificate: Digest::from_bytes([23; 32]),
         public_key: [27; 32],
     };
-    transport.remember_owner(target.cell_id(), peer, now + 10_000, now, Instant::now());
+    transport
+        .hints
+        .remember_owner(target.cell_id(), peer, now + 10_000, now, Instant::now());
     assert!(
         transport
             .send_inner(target.clone(), vec![1], 1_000)
@@ -658,22 +853,46 @@ async fn not_started_refusal_refreshes_authority_without_resending_to_stale_peer
     server.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "manual adapter owner-lookup baseline"]
-async fn owner_lookup_performance() {
-    use std::time::Instant;
+/// Returns the first OpenSSL 3 binary that can create Ed25519 keys.
+fn peer_openssl() -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(configured) = std::env::var("CELLULE_TEST_OPENSSL") {
+        candidates.push(configured);
+    }
+    candidates.extend(
+        ["openssl", "/opt/homebrew/bin/openssl", "openssl3"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    candidates.into_iter().find(|binary| {
+        std::process::Command::new(binary)
+            .args(["version"])
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).contains("LibreSSL")
+            })
+            .unwrap_or(false)
+    })
+}
 
-    let mut raw = String::from("lane\tconcurrency\telapsed_us\n");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+/// Generates a CA and one Ed25519 leaf for a local mTLS peer fixture.
+///
+/// The leaf is valid for localhost client and server authentication under the
+/// generated CA, which is the minimum the loader verifies before use.
+fn generate_peer_identity(label: &str) -> Option<(std::path::PathBuf, LoadedPeerTls)> {
+    // macOS ships LibreSSL as `openssl`, which cannot create Ed25519 keys. Try
+    // the usual OpenSSL 3 locations before reporting that the fixture is
+    // unavailable, so the suite still runs wherever one is installed.
+    let binary = peer_openssl()?;
     let certificate_dir = std::env::temp_dir().join(format!(
-        "cellule-peer-bench-cert-{}-{}",
+        "cellule-peer-{label}-{}-{}",
         std::process::id(),
         now_ms().unwrap()
     ));
-    std::fs::create_dir(&certificate_dir).unwrap();
+    std::fs::create_dir_all(&certificate_dir).unwrap();
     let openssl = |args: &[&str]| {
-        let output = std::process::Command::new("openssl")
+        let output = std::process::Command::new(&binary)
             .args(args)
             .current_dir(&certificate_dir)
             .output()
@@ -684,6 +903,7 @@ async fn owner_lookup_performance() {
             String::from_utf8_lossy(&output.stderr)
         );
     };
+
     openssl(&[
         "req",
         "-x509",
@@ -695,7 +915,7 @@ async fn owner_lookup_performance() {
         "-out",
         "ca.crt",
         "-subj",
-        "/CN=Cellule benchmark CA",
+        "/CN=Cellule test CA",
         "-days",
         "1",
         "-addext",
@@ -716,7 +936,11 @@ async fn owner_lookup_performance() {
         "-subj",
         "/CN=localhost",
     ]);
-    std::fs::write(certificate_dir.join("leaf.ext"), "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth,clientAuth\nkeyUsage=digitalSignature\n").unwrap();
+    std::fs::write(
+        certificate_dir.join("leaf.ext"),
+        "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth,clientAuth\nkeyUsage=digitalSignature\n",
+    )
+    .unwrap();
     openssl(&[
         "x509",
         "-req",
@@ -741,6 +965,89 @@ async fn owner_lookup_performance() {
         "localhost",
     )
     .unwrap();
+    Some((certificate_dir, tls))
+}
+
+/// The default listener keeps HTTP/1.1, so an HTTP/1.1-only peer keeps working.
+#[tokio::test]
+async fn default_listener_negotiates_http_1_1() {
+    let Some((certificate_dir, tls)) = generate_peer_identity("alpn-h1") else {
+        eprintln!("skipping: no OpenSSL 3 binary available for the peer identity fixture");
+        return;
+    };
+    assert_eq!(
+        peer_request_version(tls, false).await,
+        http::Version::HTTP_11
+    );
+    std::fs::remove_dir_all(certificate_dir).unwrap();
+}
+
+/// Advertising h2 negotiates multiplexed HTTP/2 end to end over pinned mTLS.
+#[tokio::test]
+async fn http2_listener_negotiates_http_2() {
+    let Some((certificate_dir, tls)) = generate_peer_identity("alpn-h2") else {
+        eprintln!("skipping: no OpenSSL 3 binary available for the peer identity fixture");
+        return;
+    };
+    assert_eq!(peer_request_version(tls, true).await, http::Version::HTTP_2);
+    std::fs::remove_dir_all(certificate_dir).unwrap();
+}
+
+/// Serves one pinned-mTLS request and returns the protocol the peer spoke.
+async fn peer_request_version(tls: LoadedPeerTls, http2: bool) -> http::Version {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route(
+        "/internal/cells/v1/forward",
+        post(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("ok"))
+                .unwrap()
+        }),
+    );
+    let client = tls
+        .client_identity()
+        .client(
+            tls.certificate(),
+            tls.signing_key().verifying_key().to_bytes(),
+        )
+        .unwrap();
+    let tls = if http2 {
+        tls.with_http2().unwrap()
+    } else {
+        tls
+    };
+    let acceptor = tls.listener(listener);
+    let server = tokio::spawn(async move { axum::serve(acceptor, router).await.unwrap() });
+    let response = client
+        .post(format!(
+            "https://localhost:{}/internal/cells/v1/forward",
+            address.port()
+        ))
+        .header(header::CONTENT_TYPE, PROTOBUF_MEDIA_TYPE)
+        .body(vec![1_u8])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let version = response.version();
+    server.abort();
+    version
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual adapter owner-lookup baseline"]
+async fn owner_lookup_performance() {
+    use std::time::Instant;
+
+    let mut raw = String::from("lane\tconcurrency\telapsed_us\n");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let Some((certificate_dir, tls)) = generate_peer_identity("bench") else {
+        eprintln!("skipping: no OpenSSL 3 binary available for the peer identity fixture");
+        return;
+    };
     let (transport, target, counted) = owner_lookup_fixture_with_endpoint(
         format!("https://localhost:{}/", address.port()),
         tls.certificate(),

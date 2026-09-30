@@ -34,8 +34,12 @@ execution, deadlines, takeover, scheduling, and drain.
 ## Overview
 
 The Cell runtime serializes accepted commands, binds each SQLite commit to an
-immutable LTX root, and publishes that root through one authoritative control
-CAS.
+immutable LTX root, and publishes roots through one authoritative control CAS.
+One published root may cover several queued commits: a commit that reached its
+follower proof can queue behind an unpublished root, and the next publication
+coalesces every queued commit into one root, so the control CAS and the shared
+directory, segment-page, and root uploads are paid once per range instead of
+once per commit.
 
 One Cell actor serializes admission and publication. A bounded SQLite worker
 runs the application callback; the actor owns the result gate and lifecycle.
@@ -67,8 +71,12 @@ sequenceDiagram
 The product path races exact object-store publication with a write-all follower
 proof. Either proof may release a command result.
 
-The actor remains occupied until object publication finishes, so later work
-cannot observe an unpublished head.
+| Aspect | Behavior |
+| --- | --- |
+| Release | A result is released only by a proof covering its own commit: the exact published root, or a follower fsync for the same cut. |
+| Occupancy | The actor stays occupied until that proof lands, so no read observes a commit before its proof. |
+| Pipelining | With a node log the proof is the follower fsync, so SQL and capture for later commands run ahead of object publication, bounded by `MAX_PENDING_PUBLICATIONS` and the pending-bytes high water. |
+| Coalescing | When several commits are queued, one root covers all of them: the merged captures append oldest first, and the range confirmation releases exactly the covered outcomes. |
 
 If the owner dies first, takeover seals the failed node log and pins and
 consumes its recovery overlays before serving. See
@@ -78,6 +86,7 @@ consumes its recovery overlays before serving. See
 
 - **Request ledger.** The request ledger records the encoded outcome. Reusing the same request ID and operation digest returns that outcome; a changed digest is rejected. A timeout after dispatch is ambiguous. The caller resolves by identity instead of re-executing a possibly committed operation.
 - **Read policies.** Queries can require a minimum receipt. `ReadPolicy::CurrentOwner` preserves owner order. `ReadPolicy::Replica` returns only a snapshot that proves its actual position; it never silently falls back to the owner.
+- **Ingress-local replica reads.** A node that already admitted a snapshot answers a replica query without reading authority, policy, or membership, and without a peer hop. The snapshot still proves its position and current owner before it releases the result; only placement discovery is skipped. A local attempt that stalls is cancelled after a bounded budget so the read still reaches a selected peer, and a snapshot that is behind, fenced, or unavailable falls through to peer placement.
 - **Coordination kernel.** The pure coordination kernel in [`src/coordination/mod.rs`](../src/coordination/mod.rs) chooses transitions without I/O. Actor adapters gather observations, call the kernel, then execute effects. This separation lets the simulator and TLA+ model replay the same decisions.
 
 <a id="actor-ownership"></a>
