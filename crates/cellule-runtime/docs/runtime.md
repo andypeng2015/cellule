@@ -431,7 +431,7 @@ activation, never correctness.
 <a id="ownership-renewal"></a>
 ## Renew and self-fence ownership
 
-- **Scanner.** One node-level scanner renews owned Cells every three seconds. A mutation publication also advances owner progress.
+- **Scanner.** Each owner normally becomes due every three seconds. One node-level scanner finds due owners every 100 ms, orders them by their original deadline, and starts at most 32 renewals concurrently. A completed renewal immediately frees a slot for the next due owner; each scan discards stale candidates. This removes the former 320-starts/s tick ceiling without reducing the one-control-update-per-active-Cell cost. A mutation publication also advances owner progress.
 - **Renewal budget.** The runtime gives a control-record renewal up to thirty seconds under object-store pressure.
 - **Session guard.** A separate node-session guard closes admission at its signed expiry, even while renewal I/O is pending.
 - **Scope.** Renewal changes owner liveness fields only. It preserves root, code, schema, and durable `next_due_ms`.
