@@ -23,6 +23,88 @@ const marketing = [
   "/changelog",
 ];
 const errors = [];
+const repositoryOnlyGuides = ["reference", "roadmap", "verification"];
+const conceptGuides = [
+  "cells",
+  "layers",
+  "durability",
+  "consistency",
+  "ownership",
+  "recovery",
+  "coordination",
+].map((slug) => `/docs/concepts/${slug}`);
+const crateGuides = manifest.authoredPages
+  .filter((page) => page.url.startsWith("/docs/crates/"))
+  .map((page) => page.url);
+const excludedReportUrls = manifest.repositoryReports.map(
+  (report) => report.formerDocUrl,
+);
+for (const expected of [
+  "/docs/crates/app/performance",
+  "/docs/crates/app/performance/2026-09-29-write-capacity",
+  "/docs/crates/ltx/perf",
+  "/docs/crates/ltx/perf/history/2026-09-benchmark-notes",
+  "/docs/crates/runtime/docs/ltx-performance-audit",
+])
+  assert(
+    excludedReportUrls.includes(expected),
+    `${expected} must be repository-only`,
+  );
+for (const report of manifest.repositoryReports) {
+  assert(report.url.startsWith("https://github.com/crabbuild/cellule/blob/main/"));
+  assert(!manifest.pages.some((page) => page.sourcePath === report.sourcePath));
+  for (const route of [
+    report.formerDocUrl,
+    report.formerDocUrl.replace("/docs/", "/markdown/"),
+  ])
+    assert.equal(
+      (await fetch(new URL(route, origin))).status,
+      404,
+      `${route} must exclude performance content`,
+    );
+}
+for (const query of ["performance", "write capacity", "LTX performance"]) {
+  const response = await fetch(
+    new URL(`/api/search?query=${encodeURIComponent(query)}`, origin),
+  );
+  assert.equal(response.status, 200);
+  const results = await response.json();
+  assert(
+    results.every(
+      (result) => !excludedReportUrls.includes(result.url?.split("#")[0]),
+    ),
+  );
+}
+for (const guide of repositoryOnlyGuides) {
+  const url = `/docs/guides/${guide}`;
+  assert(!manifest.pages.some((page) => page.url === url));
+  for (const route of [url, `/markdown/guides/${guide}`])
+    assert.equal(
+      (await fetch(new URL(route, origin))).status,
+      404,
+      `${route} is a repository-only document`,
+    );
+  const searchResponse = await fetch(
+    new URL(`/api/search?query=${guide}`, origin),
+  );
+  assert.equal(searchResponse.status, 200);
+  const results = await searchResponse.json();
+  assert(
+    results.every((result) => result.url?.split("#")[0] !== url),
+    `${url} must not be a search result`,
+  );
+}
+for (const endpoint of ["/sitemap.xml", "/llms.txt", "/llms-full.txt"]) {
+  const text = await (await fetch(new URL(endpoint, origin))).text();
+  for (const url of excludedReportUrls) {
+    assert(!text.includes(url), `${endpoint} must exclude ${url}`);
+    assert(!text.includes(url.replace("/docs/", "/markdown/")));
+  }
+  for (const guide of repositoryOnlyGuides) {
+    assert(!text.includes(`/docs/guides/${guide}`));
+    assert(!text.includes(`/markdown/guides/${guide}`));
+  }
+}
 for (const route of [
   ...marketing,
   "/docs",
@@ -126,6 +208,46 @@ try {
   );
   await chartPage.close();
 
+  for (const route of crateGuides) {
+    await page.goto(new URL(route, origin).href, { waitUntil: "networkidle" });
+    const figures = page.locator("article [data-diagram]");
+    assert((await figures.count()) > 0, `${route} needs a conceptual SVG diagram`);
+    for (const figure of await figures.all()) {
+      await figure.scrollIntoViewIfNeeded();
+      await figure.locator(".mermaid-svg svg").waitFor();
+    }
+    assert(
+      (await page.locator('article a[href^="https://github.com/crabbuild/cellule/"], article a[href*="/docs"]').count()) > 0,
+      `${route} needs source or contract references`,
+    );
+  }
+  await page.goto(new URL("/docs/crates/app/overview", origin).href, { waitUntil: "networkidle" });
+  const sidebar = page.locator("#nd-sidebar");
+  for (const title of [
+    "Modules and descriptors", "Cell topology", "Commands and outcomes",
+    "Reads and receipts", "Service integration",
+  ])
+    assert(
+      await sidebar.getByRole("link", { name: title, exact: true }).isVisible(),
+      `${title} must be visible in application navigation`,
+    );
+  assert.equal(await sidebar.getByRole("link", { name: /performance/i }).count(), 0);
+  assert.equal(await sidebar.getByRole("button", { name: /^Performance$/i }).count(), 0);
+  await page.screenshot({
+    path: path.join(root, "test-results/crate-guides-desktop.png"),
+    fullPage: true,
+  });
+  await page.goto(new URL("/performance", origin).href, { waitUntil: "networkidle" });
+  const reportLinks = await page.locator(".report-list a").evaluateAll(
+    (links) => links.map((link) => link.getAttribute("href")),
+  );
+  assert(reportLinks.length > 0, "The evidence page must retain repository links");
+  for (const href of reportLinks)
+    assert(
+      href.startsWith("https://github.com/crabbuild/cellule/blob/main/"),
+      "Evidence links must open repository reports",
+    );
+
   await page.goto(origin, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Explore Jobs", exact: true }).click();
   assert.match(
@@ -228,6 +350,45 @@ try {
     .getByRole("button", { name: "Inspect Jobs Cell", exact: true })
     .click();
   assert.match(await page.locator(".cell-inspector").innerText(), /shard\/0/);
+  const hive = page.locator(".cell-map");
+  assert.equal(await hive.locator(".cell-node").count(), 6);
+  assert.equal(await hive.locator(".cell-icon").count(), 6);
+  assert.match(
+    await hive.locator(".cell-hive-center").textContent(),
+    /cellule\./,
+  );
+  const hiveRadii = await hive.evaluate((svg) => {
+    const center = svg
+      .querySelector(".cell-hive-center > path")
+      .getBoundingClientRect();
+    const x = center.x + center.width / 2;
+    const y = center.y + center.height / 2;
+    return [...svg.querySelectorAll(".cell-node > path")].map((node) => {
+      const box = node.getBoundingClientRect();
+      return Math.hypot(box.x + box.width / 2 - x, box.y + box.height / 2 - y);
+    });
+  });
+  assert(
+    Math.max(...hiveRadii) - Math.min(...hiveRadii) < 1,
+    "Six surrounding hexagons must form an equal-radius hive around Cellule",
+  );
+  for (const name of [
+    "Orders",
+    "Settings",
+    "Assets",
+    "Runs",
+    "Jobs",
+    "Timers",
+  ]) {
+    await page
+      .getByRole("button", { name: `Inspect ${name} Cell`, exact: true })
+      .focus();
+    await page.keyboard.press("Enter");
+    assert.equal(
+      await page.locator(".cell-inspector strong").innerText(),
+      name,
+    );
+  }
   await page.getByRole("button", { name: "Next step", exact: true }).click();
   assert.match(
     await page.locator(".step-detail").innerText(),
@@ -247,6 +408,31 @@ try {
     await page.locator(".recovery-detail").innerText(),
     /fails without activating/,
   );
+  const recovery = page.locator(".recovery-svg");
+  assert.equal(await recovery.locator(".recovery-icon").count(), 4);
+  assert.match(
+    await recovery.locator(".recovery-stage").nth(2).textContent(),
+    /Restore blocked/,
+  );
+  assert.match(
+    await recovery.locator(".recovery-stage").nth(3).textContent(),
+    /No Cell activation/,
+  );
+  await page
+    .getByRole("button", { name: "Verified chunks", exact: true })
+    .click();
+  assert.match(
+    await recovery.locator(".recovery-stage").nth(2).textContent(),
+    /State \+ request ledger/,
+  );
+  assert.match(
+    await recovery.locator(".recovery-gate").textContent(),
+    /ACTIVATION ALLOWED/,
+  );
+  await recovery.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: path.join(root, "test-results/recovery-icons-desktop.png"),
+  });
   await page
     .getByRole("button", { name: "cellule-ltx Capture and restore" })
     .click();
@@ -395,6 +581,189 @@ try {
     await page.evaluate(() => navigator.clipboard.readText()),
     "cargo run -p cellule-app --example sql --locked",
   );
+
+  // The guided chapters must expose real SVGs, not only diagram source text.
+  for (const route of conceptGuides) {
+    await page.goto(new URL(route, origin).href, { waitUntil: "networkidle" });
+    const figures = page.locator("article [data-diagram]");
+    assert.equal(
+      await figures.count(),
+      2,
+      `${route} needs both conceptual SVG diagrams`,
+    );
+    for (const figure of await figures.all()) {
+      await figure.scrollIntoViewIfNeeded();
+      await figure.locator(".mermaid-svg svg").waitFor();
+    }
+    assert(
+      (await page
+        .locator(
+          "article .lesson-lab, article .interactive-panel, article .layer-explorer",
+        )
+        .count()) > 0,
+      `${route} needs an interactive explorer`,
+    );
+  }
+
+  await page.goto(new URL("/docs/concepts/consistency", origin).href, {
+    waitUntil: "networkidle",
+  });
+  const readLab = page.locator('[data-concept-lab="reads"]');
+  assert.match(await readLab.getByRole("status").innerText(), /ReplicaBehind/);
+  await readLab
+    .getByRole("button", { name: "Caught up · 44", exact: true })
+    .focus();
+  await page.keyboard.press("Enter");
+  assert.match(
+    await readLab.getByRole("status").innerText(),
+    /Replica read satisfies the minimum/,
+  );
+  await readLab
+    .getByRole("button", { name: "Unavailable", exact: true })
+    .click();
+  assert.match(
+    await readLab.getByRole("status").innerText(),
+    /ReplicaUnavailable · no automatic fallback/,
+  );
+  await readLab
+    .getByRole("button", { name: "Current owner", exact: true })
+    .click();
+  assert.match(
+    await readLab.getByRole("status").innerText(),
+    /Owner read satisfies the minimum/,
+  );
+  await readLab
+    .getByRole("checkbox", { name: "Try a receipt from Order 43" })
+    .check();
+  assert.match(
+    await readLab.getByRole("status").innerText(),
+    /Receipt belongs to another Cell/,
+  );
+  assert.match(
+    (await readLab.locator("svg").textContent()) || "",
+    /Reject read/,
+  );
+  await readLab
+    .getByRole("checkbox", { name: "Try a receipt from Order 43" })
+    .uncheck();
+  await readLab
+    .getByRole("button", { name: "Explicit replica", exact: true })
+    .click();
+  await readLab
+    .getByRole("button", { name: "Caught up · 44", exact: true })
+    .click();
+  await readLab.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: path.join(root, "test-results/receipts-concept-desktop.png"),
+  });
+
+  await page.goto(new URL("/docs/concepts/coordination", origin).href, {
+    waitUntil: "networkidle",
+  });
+  const deliveryLab = page.locator('[data-concept-lab="delivery"]');
+  await deliveryLab
+    .getByRole("checkbox", { name: "Lose the destination acknowledgement" })
+    .check();
+  for (let step = 0; step < 3; step++) {
+    await deliveryLab
+      .getByRole("button", { name: "Next delivery step", exact: true })
+      .click();
+  }
+  assert.match(
+    await deliveryLab.getByRole("status").innerText(),
+    /Retry after a lost acknowledgement/,
+  );
+  assert.match(
+    (await deliveryLab.locator("svg").textContent()) || "",
+    /Deduplicated · count 1/,
+  );
+  assert(
+    await deliveryLab
+      .getByRole("button", { name: "Next delivery step", exact: true })
+      .isDisabled(),
+  );
+  await deliveryLab
+    .getByRole("button", { name: "Restart delivery", exact: true })
+    .click();
+  assert.match(
+    await deliveryLab.getByRole("status").innerText(),
+    /Record the intent/,
+  );
+  await deliveryLab
+    .getByRole("checkbox", { name: "Lose the destination acknowledgement" })
+    .uncheck();
+  for (let step = 0; step < 3; step++) {
+    await deliveryLab
+      .getByRole("button", { name: "Next delivery step", exact: true })
+      .click();
+  }
+  assert.match(
+    await deliveryLab.getByRole("status").innerText(),
+    /Acknowledge the source/,
+  );
+  assert.match(
+    (await deliveryLab.locator("svg").textContent()) || "",
+    /Reservation count · 1/,
+  );
+
+  for (const width of [320, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const route of conceptGuides) {
+      await page.goto(new URL(route, origin).href, {
+        waitUntil: "networkidle",
+      });
+      assert(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth + 1,
+        ),
+        `${route} must keep diagrams and controls inside the page at ${width}px`,
+      );
+    }
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(new URL("/docs/concepts/consistency", origin).href, {
+    waitUntil: "networkidle",
+  });
+  const readViewport = page.getByRole("region", {
+    name: "Scrollable receipt and read diagram",
+    exact: true,
+  });
+  await readViewport.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(
+    () =>
+      document.querySelector(
+        '[aria-label="Scrollable receipt and read diagram"]',
+      ).scrollLeft > 0,
+  );
+  await page.goto(new URL("/architecture", origin).href, {
+    waitUntil: "networkidle",
+  });
+  await page.getByRole("button", { name: "Timers", exact: true }).click();
+  assert.match(await page.locator(".cell-inspector").innerText(), /Cron|CRON/);
+  assert(await page.locator(".hive-scroll-hint").isVisible());
+  assert(await page.locator(".recovery-scroll-hint").isVisible());
+  const selectedHex = await page
+    .locator(".cell-node.selected > path")
+    .boundingBox();
+  const hiveViewport = await page
+    .getByRole("region", { name: "Scrollable Cell hive" })
+    .boundingBox();
+  assert(
+    selectedHex.x >= hiveViewport.x - 1 &&
+      selectedHex.x + selectedHex.width <=
+        hiveViewport.x + hiveViewport.width + 1,
+    "Selecting a Cell must bring its hexagon into the mobile viewport",
+  );
+  const recoveryViewport = page.getByRole("region", {
+    name: "Scrollable recovery stages",
+  });
+  await recoveryViewport.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(
+    () => document.querySelector(".recovery-viewport").scrollLeft > 0,
+  );
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(new URL("/docs/guides/architecture", origin).href, {
     waitUntil: "networkidle",
   });
@@ -414,7 +783,8 @@ try {
   assert(
     (await diagram
       .locator(".mermaid-svg svg")
-      .evaluate((svg) => svg.getBoundingClientRect().width)) > initialDiagramWidth,
+      .evaluate((svg) => svg.getBoundingClientRect().width)) >
+      initialDiagramWidth,
     "Zoom must increase the rendered diagram size",
   );
   const downloadPromise = page.waitForEvent("download");
@@ -447,7 +817,9 @@ try {
     "Overview and all eight guides must exist",
   );
   for (const guide of primitiveGuides) {
-    await page.goto(new URL(guide.url, origin).href, { waitUntil: "networkidle" });
+    await page.goto(new URL(guide.url, origin).href, {
+      waitUntil: "networkidle",
+    });
     const diagrams = page.locator("[data-diagram]");
     assert(
       (await diagrams.count()) >= 2,
@@ -458,9 +830,13 @@ try {
       await diagram.locator(".mermaid-svg svg").waitFor();
       assert.equal(await diagram.locator('[role="alert"]').count(), 0);
       assert(
-        await diagram.locator(".mermaid-svg svg").evaluate((svg) =>
-          svg.getBoundingClientRect().width <= Math.max(360, svg.viewBox.baseVal.width) + 1,
-        ),
+        await diagram
+          .locator(".mermaid-svg svg")
+          .evaluate(
+            (svg) =>
+              svg.getBoundingClientRect().width <=
+              Math.max(360, svg.viewBox.baseVal.width) + 1,
+          ),
         `${guide.url} must not stretch a narrow diagram beyond its natural width`,
       );
     }
@@ -472,7 +848,9 @@ try {
   await page.goto(new URL("/docs/primitives", origin).href, {
     waitUntil: "networkidle",
   });
-  await page.getByRole("button", { name: "Follower proof", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Follower proof", exact: true })
+    .click();
   for (let i = 0; i < 4; i++)
     await page.getByRole("button", { name: "Next step", exact: true }).click();
   assert.match(await page.locator(".gate").innerText(), /open/);
@@ -484,11 +862,94 @@ try {
     path: path.join(root, "test-results/effects-guide.png"),
   });
 
+  await page.goto(new URL("/docs/guides/at-a-glance", origin).href, {
+    waitUntil: "networkidle",
+  });
+  const cellModel = page.locator("[data-svg-diagram]").filter({
+    has: page.locator('img[src$="/cell-model.svg"]'),
+  });
+  await cellModel.scrollIntoViewIfNeeded();
+  const modelImage = cellModel.locator("img");
+  assert(
+    await modelImage.evaluate(
+      (image) => image.complete && image.naturalWidth > 0,
+    ),
+  );
+  const modelWidth = (await modelImage.boundingBox()).width;
+  await cellModel.getByRole("button", { name: "Zoom in", exact: true }).click();
+  assert((await modelImage.boundingBox()).width > modelWidth);
+  await cellModel
+    .getByRole("button", { name: "Reset diagram zoom", exact: true })
+    .click();
+  assert(Math.abs((await modelImage.boundingBox()).width - modelWidth) < 1);
+  const [modelDownload] = await Promise.all([
+    page.waitForEvent("download"),
+    cellModel.getByRole("link", { name: "Download SVG", exact: true }).click(),
+  ]);
+  const downloadedModel = await readFile(await modelDownload.path(), "utf8");
+  assert.match(downloadedModel, /One Cell type, independent Cells/);
+  assert.match(
+    await (await fetch(new URL("/markdown/guides/at-a-glance", origin))).text(),
+    /!\[.*\]\(\/repository\/docs\/diagram\/cell-model\.svg\)/,
+    "Markdown exports must preserve the standalone SVG illustration",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+    "Cell model illustration must scroll within its frame on mobile",
+  );
+  await cellModel.getByRole("region").focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-svg-diagram] [role="region"]').scrollLeft >
+      0,
+  );
+
+  // Headers and row grids must fill the table border, even for short content.
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const route of [
+      "/docs/guides/introduction",
+      "/docs/guides/quickstart",
+      "/docs/primitives",
+    ]) {
+      await page.goto(new URL(route, origin).href, {
+        waitUntil: "networkidle",
+      });
+      const tables = await page.locator(".prose table").evaluateAll((tables) =>
+        tables.map((table) => ({
+          right: table.getBoundingClientRect().right,
+          rowEdges: Array.from(
+            table.rows,
+            (row) => row.getBoundingClientRect().right,
+          ),
+        })),
+      );
+      assert(tables.length > 0, `${route} needs table layout coverage`);
+      for (const table of tables)
+        assert(
+          table.rowEdges.every((right) => Math.abs(table.right - right) <= 2),
+          `${route} has unused space inside a table border at ${width}px`,
+        );
+      assert(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth + 1,
+        ),
+        `${route} tables must not overflow the page at ${width}px`,
+      );
+    }
+  }
+
   await page.setViewportSize({ width: 390, height: 844 });
   for (const route of [
     ...marketing,
     "/docs",
     "/docs/guides/architecture",
+    ...conceptGuides,
+    ...crateGuides,
     ...primitiveGuides.map((guide) => guide.url),
   ]) {
     await page.goto(new URL(route, origin).href, { waitUntil: "networkidle" });
