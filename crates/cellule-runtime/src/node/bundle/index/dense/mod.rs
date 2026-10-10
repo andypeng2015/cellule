@@ -2,6 +2,10 @@
 use super::*;
 
 mod native;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+pub(in crate::node::bundle) use tests::encode_original;
 
 pub(super) fn encode(
     catalog: &mut Catalog,
@@ -86,13 +90,15 @@ pub(super) fn encode(
         new.insert(pin);
     }
     let mut offset = HEADER_BYTES as u64;
+    let mut plans = Vec::new();
     for id in &changed {
         let rows = groups.get(id).cloned().unwrap_or_default();
         if rows.is_empty() {
             shards[usize::from(*id)] = None;
             continue;
         }
-        let bytes = history::encode_leaf(&leaf(catalog, rows), &histories)?.len() as u64;
+        let plan = history::LeafPlan::new(&leaf(catalog, rows), &histories)?;
+        let bytes = plan.len() as u64;
         shards[usize::from(*id)] = Some(Shard {
             extent: Locator {
                 object: None,
@@ -105,6 +111,7 @@ pub(super) fn encode(
         offset = offset
             .checked_add(bytes)
             .ok_or(Error::Capacity("bundle shard bytes"))?;
+        plans.push((*id, plan));
     }
     let native = native::assign(catalog, frames, &changed, &mut offset)?;
     let mut history_bodies = Vec::new();
@@ -140,13 +147,13 @@ pub(super) fn encode(
     if offset > MAX_BUNDLE_BYTES {
         return Err(Error::Capacity("bundle bytes"));
     }
-    // Detached leaf encoding replaces every nonempty locator array with its
-    // authenticated history extent. Native offset updates cannot change those
-    // compact rows, so retain the original groups instead of cloning them again.
+    // Final history locations occupy the same recorded fields as the planning
+    // extents. Reuse the validated shard bytes rather than reserializing every
+    // sibling control record; final self-verification still decodes all rows.
     let mut bodies = Vec::new();
-    for id in &changed {
-        if let Some(reference) = &mut shards[usize::from(*id)] {
-            let body = history::encode_leaf(&leaf(catalog, groups[id].clone()), &histories)?;
+    for (id, plan) in plans {
+        if let Some(reference) = &mut shards[usize::from(id)] {
+            let body = plan.finish(&histories)?;
             if body.len() as u64 != reference.extent.bytes {
                 return Err(Error::Node("bundle shard size changed during encoding"));
             }
