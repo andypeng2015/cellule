@@ -8,6 +8,16 @@ pub(super) const CHECKPOINT_COMMANDS: u64 = 215;
 const MAX_ROOT_AGE: std::time::Duration = std::time::Duration::from_secs(45);
 const MAX_MATERIALIZERS: usize = 8;
 
+fn reserve_materialization(
+    resources: &crate::fleet::resource::ResourceLedger,
+    bytes: usize,
+) -> crate::Result<crate::fleet::resource::ResourceReservation> {
+    resources.try_reserve_materialization(ResourceCost::zero().with_retained_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests;
+
 pub(super) fn blocks_commands(active: &ActiveCell) -> bool {
     active.root_debt.as_ref().is_some_and(|debt| {
         debt.selected.proof.locator_count() >= CHECKPOINT_COMMANDS as usize
@@ -203,6 +213,19 @@ pub(super) fn dispatch(
     if available == 0 {
         return;
     }
+    // Every root needs at least this original I/O body and prefix metadata.
+    // Avoid sorting the entire dirty fleet on each SQL event when no parallel
+    // job can fit. Exact admission below still arbitrates concurrent releases.
+    let minimum = crate::node::bundle::MAX_BUNDLE_BYTES as usize
+        + crate::node::bundle::MaterializedBundlePrefix::maximum_retained_bytes();
+    if running != 0
+        && pool
+            .resource_ledger()
+            .materialization_headroom()
+            .is_ok_and(|(bytes, working)| working && bytes <= minimum)
+    {
+        return;
+    }
     let now = std::time::Instant::now();
     let mut ready: Vec<_> = cells
         .iter()
@@ -233,10 +256,7 @@ pub(super) fn dispatch(
                     )
                     .ok_or(Error::Capacity("checkpoint metadata admission"))
             })
-            .and_then(|bytes| {
-                pool.resource_ledger()
-                    .try_reserve(ResourceCost::zero().with_retained_bytes(bytes))
-            });
+            .and_then(|bytes| reserve_materialization(&pool.resource_ledger(), bytes));
         let Ok(reservation) = reservation else {
             continue;
         };
@@ -281,10 +301,12 @@ pub(super) fn dispatch(
                 drop(reservation);
                 // Checkpoint this exact cut. Later selected captures can retire
                 // independently; a rebased proof waits for the native witness.
-                debt.durability.checkpoint_materialized(publisher.authority(), root).await?;
+                pool.telemetry_handle().publication_phase(crate::fleet::telemetry::NodePublicationPhase::CheckpointWait,
+                    debt.durability.checkpoint_materialized(publisher.authority(), root)).await?;
                 // Transfer pre-admitted metadata to the worker. No admission
                 // can fail after the canonical root and checkpoint are joined.
-                pool.bind_bundle_materialized(cell, root, Arc::clone(&debt.selected), retained).await
+                pool.telemetry_handle().publication_phase(crate::fleet::telemetry::NodePublicationPhase::WorkerBinding,
+                    pool.bind_bundle_materialized(cell, root, Arc::clone(&debt.selected), retained)).await
             }.await;
             joined.cancel();
             publisher.record_publication_timing(crate::fleet::telemetry::PublicationTiming {

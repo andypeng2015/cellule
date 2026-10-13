@@ -61,6 +61,51 @@ separate profile: do not compare it as an algorithm change against historical
 shared-VM runs. Guest CPU placement does not isolate host services or qualify
 physical-device durability; report those limits separately.
 
+`--resource-profile three-node-1cpu` runs one owner and two required followers,
+each with 1 CPU, 2 GiB memory and no swap. They occupy guest CPUs 0, 1 and 2.
+RustFS uses CPUs 3–4 with a 2-CPU/2-GiB limit; the client uses CPUs 5–8 with
+a 4-CPU/2-GiB limit. Each application node uses one SQLite worker and one
+Tokio worker. This profile requires at least nine guest CPUs and 12 GiB usable
+memory and saves the same Docker and effective cgroup checks. It keeps the
+64-MiB retained-work budget and all delivery, debt and ACK audit requirements.
+These are three capped containers in one Linux VM; host failures remain shared.
+Record this profile separately from either 8-CPU owner profile. Node state is
+still tmpfs, so device-backed crash tests remain a separate verification route.
+
+```sh
+python3 scripts/perf/run.py cellule-fleet --context dedicated-linux \
+  --artifacts /absolute/external/candidate --resource-profile three-node-1cpu \
+  --tag three-small-nodes --cells 2000 --seconds 300 --warmup 30 \
+  --repetitions 1 --write-rates 750 1000 1500 2000
+```
+
+`--resource-profile three-vm-1cpu --node-contexts OWNER FOLLOWER1 FOLLOWER2`
+instead places each node on a separate Docker host. Each node VM must have
+one guest CPU and a 2-GiB configured memory limit; the runner checks one CPU,
+usable RAM between 1.75 and 2 GiB, and three distinct Docker host identities.
+Record hypervisor configuration separately to verify the total VM allocation.
+Node containers use CPU 0, a 2-GiB ceiling and no swap; disable guest swap as
+well. This profile retains a fresh disk-backed node volume, rather than tmpfs,
+and records its filesystem. Node volumes and provider volumes remain retained.
+
+The separate support context needs at least six CPUs and 7 GiB usable RAM:
+RustFS uses CPUs 0–1 and the client 2–5, with the same 2-GiB container limits.
+All nodes must reach the provider at loopback port 9000. The owner and client
+must reach follower ports 8090 and 8100, and the client must reach owner port
+8080. This fixture keeps loopback-only application endpoints; prepare and record
+those cross-VM routes before running. TCP tunnels retain end-to-end pinned mTLS
+but add transport overhead that belongs in the reported configuration. Capture
+guest memory, swap, boot identity and OOM evidence alongside host contention.
+Existing delivery, debt, audit and 120-second drain requirements still apply.
+
+```sh
+python3 scripts/perf/run.py cellule-fleet --context separate-support \
+  --artifacts /absolute/external/candidate --resource-profile three-vm-1cpu \
+  --node-contexts node-owner node-follower-1 node-follower-2 \
+  --tag three-vms --cells 2000 --seconds 300 --warmup 30 \
+  --repetitions 1 --write-rates 750 1000 1500 2000
+```
+
 The example authority's renewal and publication regressions use a generated TLS
 identity and an in-memory directory. From an isolated verification checkout,
 run them explicitly with the TLS directory produced by

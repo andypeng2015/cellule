@@ -126,7 +126,8 @@ impl NodeDirectory {
         }
         // Cloned locator arrays cannot exceed the validated history bound.
         // Collected live assignments grow geometrically within the 64-frame
-        // cohort. Control-owned strings/maps retain their existing 4x charge.
+        // cohort. Preserve the conservative codec/endpoint preflight allowance;
+        // transfer only concrete retained allocations after verification.
         let origin = self.layout.node_path(&[0; 16]).to_string();
         let each = MAX_LOCATORS * std::mem::size_of::<Locator>()
             + MAX_FRAMES * std::mem::size_of::<crate::node::log::AssignedCommitRange>()
@@ -381,48 +382,61 @@ impl NodeDirectory {
         if prepared.assignments.is_empty() {
             return Err(Error::Node("native bundle has no complete assignments"));
         }
-        let origin = origin::OriginBundle::load(&self.layout, prepared).await?;
-        let bindings = origin.selected_bindings(prepared)?;
-        let mut fresh = Vec::with_capacity(bindings.len());
-        for binding in &bindings {
-            if !extension::verify(
-                &self.layout,
-                prepared,
-                lease,
-                binding,
-                prefixes,
-                limits,
-                &origin,
-            )? {
-                fresh.push(binding);
-            }
-        }
-        verification::verify_cohort(
-            &self.layout,
-            prepared.catalog.session,
-            prepared.catalog.epoch,
-            &fresh,
-            limits,
-            &origin,
-        )
-        .await?;
-        let mut proofs = Vec::new();
-        for binding in bindings {
-            let pin = binding
-                .control
-                .bundle_binding
-                .ok_or(Error::Node("selected binding lacks pin"))?;
-            proofs.push(BundleCoverageProof {
-                pin,
-                binding,
-                head: prepared.head,
-                session: prepared.catalog.session,
-                live: None,
-            });
-        }
+        let mut proofs = self
+            .telemetry
+            .publication_phase(
+                crate::fleet::telemetry::NodePublicationPhase::Verification,
+                async {
+                    let origin = origin::OriginBundle::load(&self.layout, prepared).await?;
+                    let bindings = origin.selected_bindings(prepared)?;
+                    let mut fresh = Vec::with_capacity(bindings.len());
+                    for binding in &bindings {
+                        if !extension::verify(
+                            &self.layout,
+                            prepared,
+                            lease,
+                            binding,
+                            prefixes,
+                            limits,
+                            &origin,
+                        )? {
+                            fresh.push(binding);
+                        }
+                    }
+                    verification::verify_cohort(
+                        &self.layout,
+                        prepared.catalog.session,
+                        prepared.catalog.epoch,
+                        &fresh,
+                        limits,
+                        &origin,
+                    )
+                    .await?;
+                    let mut proofs = Vec::new();
+                    for binding in bindings {
+                        let pin = binding
+                            .control
+                            .bundle_binding
+                            .ok_or(Error::Node("selected binding lacks pin"))?;
+                        proofs.push(BundleCoverageProof {
+                            pin,
+                            binding,
+                            head: prepared.head,
+                            session: prepared.catalog.session,
+                            live: None,
+                        });
+                    }
+                    Ok(proofs)
+                },
+            )
+            .await?;
         lease.check()?;
         let selected = self
-            .select_native_catalog(observed, prepared, now_ms)
+            .telemetry
+            .publication_phase(
+                crate::fleet::telemetry::NodePublicationPhase::AuthorityCas,
+                self.select_native_catalog(observed, prepared, now_ms),
+            )
             .await?;
         // Expiry during verification must not revive the original writer.
         lease.check()?;

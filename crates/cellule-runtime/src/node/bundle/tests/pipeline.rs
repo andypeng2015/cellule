@@ -12,17 +12,17 @@ use futures_util::stream::BoxStream;
 use object_store::ObjectStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Debug, Default)]
-struct ManagedStore {
+pub(super) struct ManagedStore {
     inner: InMemory,
-    armed: AtomicBool,
-    puts: std::sync::atomic::AtomicUsize,
-    hold_second: AtomicBool,
-    second_entered: tokio::sync::Notify,
-    second_done: tokio::sync::Notify,
-    second_resume: tokio::sync::Notify,
-    fail_first: AtomicBool,
-    entered: tokio::sync::Notify,
-    resume: tokio::sync::Notify,
+    pub(super) armed: AtomicBool,
+    pub(super) puts: std::sync::atomic::AtomicUsize,
+    pub(super) hold_second: AtomicBool,
+    pub(super) second_entered: tokio::sync::Notify,
+    pub(super) second_done: tokio::sync::Notify,
+    pub(super) second_resume: tokio::sync::Notify,
+    pub(super) fail_first: AtomicBool,
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) resume: tokio::sync::Notify,
 }
 
 impl std::fmt::Display for ManagedStore {
@@ -321,6 +321,68 @@ async fn tight_original_budget_uses_one_cohort_and_returns_all_credit() {
             < 32 << 20
     );
     case.store.resume.notify_one();
+    case.finish([first, second]).await;
+}
+
+#[tokio::test]
+async fn optional_overlap_preserves_foreground_headroom_with_live_selected_debt() {
+    use crate::fleet::resource::{ResourceCost, RetentionStage};
+    let mut case = Case::new(64 << 20, false, false).await;
+    // Model other Cells' original selected receipts while this cohort's PUT
+    // is stalled. The optional successor must not make fresh SQL shed itself.
+    let selected_debt = case
+        .pool
+        .resource_ledger()
+        .try_reserve_in(
+            RetentionStage::Selection,
+            ResourceCost::zero().with_retained_bytes(14 << 20),
+        )
+        .unwrap();
+    let first = case.first().await;
+    let second = case.second().await;
+    let overlapped = tokio::time::timeout(
+        Duration::from_millis(250),
+        case.store.second_done.notified(),
+    )
+    .await
+    .is_ok();
+    assert!(
+        !overlapped,
+        "optional overlap consumed foreground progress headroom"
+    );
+    let snapshot = case.pool.resource_ledger().snapshot().unwrap();
+    assert_eq!(
+        snapshot.retained_by_stage[RetentionStage::Pipeline as usize],
+        0
+    );
+    assert!(snapshot.used.retained_bytes() < snapshot.limit.retained_bytes() * 3 / 4);
+    case.store.resume.notify_one();
+    drop(selected_debt);
+    case.finish([first, second]).await;
+}
+
+#[tokio::test]
+async fn compact_pipeline_overlaps_with_selected_debt_without_consuming_foreground_headroom() {
+    use crate::fleet::resource::{ResourceCost, RetentionStage};
+    let mut case = Case::new(64 << 20, false, false).await;
+    let selected_debt = case
+        .pool
+        .resource_ledger()
+        .try_reserve_in(
+            RetentionStage::Selection,
+            ResourceCost::zero().with_retained_bytes(8 << 20),
+        )
+        .unwrap();
+    let first = case.first().await;
+    let second = case.second().await;
+    tokio::time::timeout(Duration::from_secs(2), case.store.second_done.notified())
+        .await
+        .unwrap();
+    let snapshot = case.pool.resource_ledger().snapshot().unwrap();
+    assert!(snapshot.used.retained_bytes() < snapshot.limit.retained_bytes() * 3 / 4);
+    assert_eq!(case.durability.progress().unwrap().tiered_through, 0);
+    case.store.resume.notify_one();
+    drop(selected_debt);
     case.finish([first, second]).await;
 }
 
